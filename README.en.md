@@ -145,3 +145,4 @@ If the GitHub repository is private, set `MBF_TWAIN_GITHUB_TOKEN` to a token tha
 
 - Thanks to the [TWAIN Working Group](https://twain.org/) for the open TWAIN protocol specification and reference implementations.
 - Thanks to [shu26.cfd](https://shu26.cfd) for supporting and sponsoring open-source projects.
+- This project is recognized by the [LINUX DO community](https://linux.do/).

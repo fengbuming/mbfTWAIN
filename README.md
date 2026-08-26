@@ -145,3 +145,4 @@ build\release\mbfTwain-Setup-v<version>.exe.sha256
 
 - 感谢 [TWAIN Working Group](https://twain.org/) 提供开放的 TWAIN 协议规范与参考实现。
 - 感谢 [shu26.cfd](https://shu26.cfd) 对开源项目的支持与赞助。
+- 本开源项目已入选并认可 [LINUX DO 社区](https://linux.do/)，愿与社区共建开放生态。
