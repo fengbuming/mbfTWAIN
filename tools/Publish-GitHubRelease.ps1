@@ -1,6 +1,6 @@
-param(
+﻿param(
     [string]$Version = "1.0.0",
-    [string]$Repo = "mingbingfeng/mbfTWAIN",
+    [string]$Repo = "fengbuming/mbfTWAIN",
     [string]$Branch = "",
     [string]$InstallerPath = "",
     [string]$ChecksumPath = "",

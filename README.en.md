@@ -1,0 +1,147 @@
+# mbfTwain — Virtual TWAIN Scanner
+
+[![License: PolyForm Noncommercial](https://img.shields.io/badge/License-PolyForm%20Noncommercial-blue.svg)](LICENSE)
+[![Version](https://img.shields.io/badge/version-1.0.3-brightgreen.svg)](https://github.com/fengbuming/mbfTWAIN/releases)
+
+**English** | [中文](README.md)
+
+`mbfTwain` is a phased virtual TWAIN 2.x scanner implementation. At its core is a native C++ TWAIN Data Source module paired with a .NET image-selection UI, enabling any TWAIN-compliant application to acquire pre-prepared images from a "virtual scanner" — no physical hardware required for development, testing, or demonstration of scanning workflows.
+
+Current progress covers Phase 1 through Phase 4a scaffolding: the native DS module exports `DS_Entry`, tracks Source Loaded / Opened / Enabled / Transfer Ready states, negotiates core scanner capabilities, connects to the .NET image-selection UI over Named Pipes, starts a new image-selection session when a TWAIN host enables the source UI, and supports both native DIB image transfer and buffered memory transfer.
+
+## Features
+
+- **Full TWAIN 2.x lifecycle**: Implements the `DS_Entry` entry point, covering the complete Source Loaded → Opened → Enabled → Transfer Ready state machine.
+- **Dual-architecture support**: Ships both Win32 and x64 builds for 32-bit and 64-bit TWAIN host applications.
+- **Native DIB and memory transfer**: Supports both `DAT_IMAGENATIVEXFER` (native DIB) and `DAT_IMAGEMEMXFER` (buffered memory) image transfer modes.
+- **Visual image-selection UI**: A .NET WPF interface for adding, removing, and reordering images — the queue order is the transfer order.
+- **Configurable scan parameters**: Pixel format (GRAY / RGB / BW), paper size (A4 / Letter, etc.), DPI, duplex scanning, and feed interval are all adjustable.
+- **Named Pipe IPC**: The DS and UI process communicate over named pipes, supporting a UI delayed-ready callback path.
+- **Built-in update check**: The configuration UI includes GitHub Release version detection with one-click download and UAC-elevated installation.
+
+## Screenshots
+
+### Main Window — Image Queue and Scan Control
+
+![Main Window](docs/assets/readme_img1.png)
+
+The main window displays the pending-scan image queue. Arrows on either side of each thumbnail adjust the order — the list order is the scan transfer order. Click "Add Image" to append new images, and "Start Scan" to transfer them to the TWAIN host in queue order. The status bar at the bottom shows queue length, current page, pixel format, paper size, DPI, and connection state in real time.
+
+### Scan Settings — Parameter Configuration and Update Check
+
+![Scan Settings](docs/assets/readme_img2.png)
+
+The Scan Settings dialog allows configuration of pixel format, paper size, DPI resolution, duplex scanning, and feed interval. It also displays the current version and provides a "Check for Updates" button that detects the latest GitHub Release and downloads the installer.
+
+### Host-Side Selection — TWAIN Source List
+
+![Scanner Selection](docs/assets/readme_img3.png)
+
+In any TWAIN-compliant host application, `mbf Virtual TWAIN Scanner` appears in the available scanner list. Once selected and confirmed, the host application can interact with the virtual scanner through the standard TWAIN workflow.
+
+## Project Layout
+
+```text
+external/twain/2.4/twain.h              Official TWAIN 2.4 public header
+src/VirtualTwainDS/                     Native C++ TWAIN Data Source module
+src/VirtualScannerConfig/               .NET image-selection and configuration UI
+docs/twain-discovery.md                 How TWAIN applications discover the DS
+docs/phase-1-architecture.zh-CN.md      Phase 1 architecture notes (Chinese)
+docs/phase-2-capabilities.zh-CN.md      Phase 2 capability negotiation behavior
+docs/ipc-protocol.zh-CN.md              Phase 3 Named Pipe IPC protocol
+docs/phase-4a-native-transfer.zh-CN.md  Phase 4a: native DIB transfer behavior
+tools/SmokeDsEntry/                      Minimal loader smoke test for DS_Entry
+tools/SmokeIpcClient/                    C++ IPC client smoke test
+tools/FakeScannerPipeServer/             Deterministic pipe server for transfer tests
+```
+
+## Build
+
+Build from a Visual Studio Developer PowerShell:
+
+```powershell
+msbuild .\src\VirtualTwainDS\VirtualTwainDS.vcxproj /p:Configuration=Release /p:Platform=Win32
+msbuild .\src\VirtualTwainDS\VirtualTwainDS.vcxproj /p:Configuration=Release /p:Platform=x64
+```
+
+Use the Win32 build for 32-bit TWAIN applications and the x64 build for 64-bit applications. TWAIN sources are loaded in-process by the Data Source Manager, so bitness must match the host process.
+
+The build output uses a `.ds` extension because DSM discovery expects TWAIN Data Source modules to use that extension.
+
+The project defaults to the MSVC `v143` toolset. If your Visual Studio installation uses another toolset, change the `PlatformToolset` value in `src/VirtualTwainDS/VirtualTwainDS.vcxproj` or override it with `/p:PlatformToolset=<installed-toolset>`.
+
+## Smoke Test
+
+`tools/SmokeDsEntry/SmokeDsEntry.cpp` dynamically loads a built DS module and calls the lifecycle and capability triplets:
+
+```text
+DAT_IDENTITY / MSG_GET
+DAT_IDENTITY / MSG_OPENDS
+DAT_IDENTITY / MSG_CLOSEDS
+DAT_STATUS   / MSG_GET
+```
+
+`tools/SmokeIpcClient/SmokeIpcClient.cpp` connects to the configuration UI's Named Pipe server and verifies the C++ IPC client can read the UI state.
+
+`tools/FakeScannerPipeServer` can stand in for the UI when testing transfer paths:
+
+```powershell
+dotnet build .\tools\FakeScannerPipeServer\FakeScannerPipeServer.csproj -c Release
+dotnet .\tools\FakeScannerPipeServer\bin\Release\net10.0\mbfTwain.FakeScannerPipeServer.dll --image .\build\test-assets\page1.bmp --connections 3 --revision 42
+```
+
+With the fake server already listening, set `MBF_SMOKE_EXPECT_XFERREADY=1` and run `SmokeDsEntry.exe` against the built `.ds`. Set `MBF_SMOKE_USE_MEMORY=1` as well to exercise `DAT_IMAGEMEMXFER` instead of `DAT_IMAGENATIVEXFER`.
+
+To exercise the UI-style delayed-ready path, start the fake server with `--scan 0 --scan-after-begin-delay-ms 200 --connections 40`, then also set `MBF_SMOKE_EXPECT_ENABLE_CALLBACK=1`. That asserts the DS raises `DAT_NULL/MSG_XFERREADY` before the first explicit `DAT_EVENT` poll.
+
+## Runtime UI
+
+When a TWAIN host calls `DAT_USERINTERFACE / MSG_ENABLEDS` with `ShowUI=TRUE`, the DS asks the UI process to begin a fresh scan session. If the UI is not already running, the DS tries to start `mbfTwain.VirtualScannerConfig.exe` from:
+
+```text
+MBF_TWAIN_UI_EXE
+same directory as mbfVirtualTwainDS.ds
+src\VirtualScannerConfig\bin\Release\net10.0-windows
+```
+
+The UI clears the previous image list, shows itself, waits for image selection, then sends those images after the user clicks Start Scan. Once image transfer to the TWAIN host starts, the DS asks the UI to hide without clearing its session state. After the final transfer is acknowledged, the UI clears the list and remains hidden until the next scan. If the host sets `CAP_XFERCOUNT` to a positive value, the DS only transfers that many images in the current session and discards any additional selected images.
+
+For an installed TWAIN source, copy the `.ds` file and the `mbfTwain.VirtualScannerConfig.*` runtime files into the same TWAIN source directory, or set `MBF_TWAIN_UI_EXE` to the full path of `mbfTwain.VirtualScannerConfig.exe`.
+
+## Release Packaging
+
+Build and package a release installer with the local Inno Setup 6 installation:
+
+```powershell
+.\tools\Build-Release.ps1 -Version 1.0.3 -InnoSetupPath "D:\Program Files (x86)\Inno Setup 6"
+```
+
+The script reuses `Install-LocalTwain.ps1` in build-only mode, stages both Win32 and x64 TWAIN source builds, runs the smoke tests unless `-SkipSmoke` is passed, then writes:
+
+```text
+build\release\mbfTwain-Setup-v<version>.exe
+build\release\mbfTwain-Setup-v<version>.exe.sha256
+```
+
+Publish the committed build to GitHub Releases after packaging:
+
+```powershell
+.\tools\Publish-GitHubRelease.ps1 -Version 1.0.3
+```
+
+The installer copies the DS and UI runtime files into `C:\Windows\twain_32` and `C:\Windows\twain_64`, and sets the machine environment variable `MBF_TWAIN_FORCE_UI=1`.
+
+## Updates
+
+The configuration UI checks `https://api.github.com/repos/fengbuming/mbfTWAIN/releases/latest` for the newest GitHub Release. The settings dialog contains a **Check for Updates** button that downloads the release installer asset matching `*Setup*.exe` to the user's temporary update directory, then starts it with UAC elevation.
+
+If the GitHub repository is private, set `MBF_TWAIN_GITHUB_TOKEN` to a token that can read the repository releases before launching the UI. Public releases do not require a token.
+
+## License
+
+`mbfTwain` is public source-available software for noncommercial use under the [PolyForm Noncommercial License 1.0.0](LICENSE). Commercial use requires prior written permission from the copyright holder. See [COMMERCIAL-LICENSE.md](COMMERCIAL-LICENSE.md) and [NOTICE](NOTICE).
+
+## Acknowledgments
+
+- Thanks to the [TWAIN Working Group](https://twain.org/) for the open TWAIN protocol specification and reference implementations.
+- Thanks to [shu26.cfd](https://shu26.cfd) for supporting and sponsoring open-source projects.

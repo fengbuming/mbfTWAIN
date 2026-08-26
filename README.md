@@ -1,61 +1,78 @@
-# mbfTwain
+# mbfTwain — 虚拟 TWAIN 扫描仪
 
-`mbfTwain` is a phased virtual TWAIN 2.x scanner implementation.
+[![License: PolyForm Noncommercial](https://img.shields.io/badge/License-PolyForm%20Noncommercial-blue.svg)](LICENSE)
+[![Version](https://img.shields.io/badge/version-1.0.3-brightgreen.svg)](https://github.com/fengbuming/mbfTWAIN/releases)
 
-## License
+[English](README.en.md) | **中文**
 
-`mbfTwain` is public source-available software for noncommercial use
-under the [PolyForm Noncommercial License 1.0.0](LICENSE). Commercial
-use requires prior written permission from the copyright holder. See
-[COMMERCIAL-LICENSE.md](COMMERCIAL-LICENSE.md) and [NOTICE](NOTICE).
+`mbfTwain` 是一个分阶段实现的虚拟 TWAIN 2.x 扫描仪。它以原生 C++ TWAIN Data Source 模块为核心，配合 .NET 图像选择 UI，让任何支持 TWAIN 协议的应用程序都能从"虚拟扫描仪"中获取预先准备好的图像——无需真实硬件，即可完成扫描流程的开发、测试与演示。
 
-Current work includes Phase 1 through Phase 4a scaffolding: the native C++
-TWAIN Data Source module exports `DS_Entry`, tracks source-loaded/opened/enabled
-and transfer-ready states, negotiates core scanner capabilities, connects to a
-.NET image-selection UI over Named Pipes, starts a new image-selection session
-when a TWAIN host enables the source UI, and supports native DIB image transfer
-plus buffered memory transfer. Real DSM/application installation validation is
-the next major hardening phase.
+当前已完成第一阶段至第四阶段 A 的脚手架：原生 DS 模块导出 `DS_Entry`，跟踪 Source Loaded / Opened / Enabled / Transfer Ready 状态，协商核心扫描仪能力，通过命名管道连接 .NET 图像选择 UI，在 TWAIN 主机启用源 UI 时启动新的图像选择会话，并支持原生 DIB 图像传输与缓冲内存传输。
 
-## Project Layout
+## 功能特性
+
+- **完整 TWAIN 2.x 生命周期**：实现 `DS_Entry` 入口，覆盖 Source Loaded → Opened → Enabled → Transfer Ready 全状态机
+- **双架构支持**：同时提供 Win32 与 x64 构建，适配 32 位 / 64 位 TWAIN 主机应用
+- **原生 DIB 与内存传输**：支持 `DAT_IMAGENATIVEXFER`（原生 DIB）与 `DAT_IMAGEMEMXFER`（缓冲内存）两种图像传输模式
+- **可视化图像选择 UI**：.NET WPF 界面支持添加、删除、重排图像，队列顺序即扫描传输顺序
+- **可配置扫描参数**：像素格式（GRAY / RGB / BW）、纸张尺寸（A4 / Letter 等）、DPI、双面扫描、送纸间隔均可调
+- **Named Pipe IPC**：DS 与 UI 进程通过命名管道通信，支持 UI 延迟就绪（delayed-ready）回调路径
+- **自动更新检查**：配置 UI 内置 GitHub Release 版本检测，一键下载并以 UAC 提权安装更新
+
+## 界面预览
+
+### 主界面 — 图像队列与扫描控制
+
+![主界面](docs/assets/readme_img1.png)
+
+主界面展示待扫描图像队列。缩略图两侧的箭头可调整顺序，列表顺序即为扫描传输顺序；点击"添加图片"可加入新图像，"开始扫描"后将按队列顺序向 TWAIN 主机传输图像。底部状态栏实时显示队列长度、当前页码、像素格式、纸张尺寸、DPI 与连接状态。
+
+### 扫描设置 — 参数配置与版本更新
+
+![扫描设置](docs/assets/readme_img2.png)
+
+扫描设置对话框支持配置像素格式、纸张尺寸、DPI 分辨率、双面扫描及送纸间隔。对话框同时显示当前版本，并提供"检查更新"按钮，可直接检测 GitHub 上的最新 Release 并下载安装。
+
+### 主机端选择 — TWAIN 源列表
+
+![扫描仪选择](docs/assets/readme_img3.png)
+
+在任意支持 TWAIN 协议的主机应用程序中，`mbf Virtual TWAIN Scanner` 会出现在可用扫描仪列表中。选择并确认后，主机应用即可通过标准 TWAIN 流程与虚拟扫描仪交互。
+
+## 项目结构
 
 ```text
-external/twain/2.4/twain.h        Official TWAIN 2.4 public header
-src/VirtualTwainDS/               Native TWAIN Data Source module
-docs/twain-discovery.md           How TWAIN applications discover the DS
-docs/phase-1-architecture.zh-CN.md Phase 1 design notes in Chinese
-docs/phase-2-capabilities.zh-CN.md Phase 2 capability behavior
-docs/ipc-protocol.zh-CN.md        Phase 3 Named Pipe protocol
-docs/phase-4a-native-transfer.zh-CN.md Native DIB transfer behavior
-tools/SmokeDsEntry/               Minimal loader smoke test for DS_Entry
-tools/SmokeIpcClient/             C++ IPC client smoke test
-tools/FakeScannerPipeServer/      Deterministic pipe server for transfer smoke tests
+external/twain/2.4/twain.h              官方 TWAIN 2.4 公共头文件
+src/VirtualTwainDS/                     原生 C++ TWAIN Data Source 模块
+src/VirtualScannerConfig/               .NET 图像选择与配置 UI
+docs/twain-discovery.md                 TWAIN 应用发现 DS 的机制说明
+docs/phase-1-architecture.zh-CN.md      第一阶段架构设计笔记（中文）
+docs/phase-2-capabilities.zh-CN.md      第二阶段能力协商行为
+docs/ipc-protocol.zh-CN.md              第三阶段命名管道 IPC 协议
+docs/phase-4a-native-transfer.zh-CN.md  第四阶段 A：原生 DIB 传输行为
+tools/SmokeDsEntry/                      DS_Entry 最小加载冒烟测试
+tools/SmokeIpcClient/                    C++ IPC 客户端冒烟测试
+tools/FakeScannerPipeServer/             用于传输测试的确定性管道服务器
 ```
 
-## Build
+## 构建
 
-Build from a Visual Studio Developer PowerShell:
+在 Visual Studio Developer PowerShell 中执行：
 
 ```powershell
 msbuild .\src\VirtualTwainDS\VirtualTwainDS.vcxproj /p:Configuration=Release /p:Platform=Win32
 msbuild .\src\VirtualTwainDS\VirtualTwainDS.vcxproj /p:Configuration=Release /p:Platform=x64
 ```
 
-Use the Win32 build for 32-bit TWAIN applications and the x64 build for 64-bit
-TWAIN applications. TWAIN sources are loaded in-process by the Data Source
-Manager, so bitness must match the host process.
-The build output uses a `.ds` extension because DSM discovery expects TWAIN
-Data Source modules to use that extension.
+32 位 TWAIN 应用使用 Win32 构建，64 位应用使用 x64 构建。TWAIN 源由 Data Source Manager 在进程内加载，因此位数必须与主机进程匹配。
 
-The project defaults to the MSVC `v143` toolset. If your Visual Studio
-installation uses another toolset, change the `PlatformToolset` value in
-`src/VirtualTwainDS/VirtualTwainDS.vcxproj` or override it with
-`/p:PlatformToolset=<installed-toolset>`.
+构建输出使用 `.ds` 扩展名，因为 DSM 发现机制要求 TWAIN Data Source 模块使用该扩展名。
 
-## Smoke Test
+项目默认使用 MSVC `v143` 工具集。如 Visual Studio 安装使用其他工具集，可修改 `src/VirtualTwainDS/VirtualTwainDS.vcxproj` 中的 `PlatformToolset` 值，或通过 `/p:PlatformToolset=<installed-toolset>` 覆盖。
 
-`tools/SmokeDsEntry/SmokeDsEntry.cpp` dynamically loads a built DS module and calls
-the lifecycle and capability triplets:
+## 冒烟测试
+
+`tools/SmokeDsEntry/SmokeDsEntry.cpp` 动态加载构建好的 DS 模块，并调用生命周期与能力三元组：
 
 ```text
 DAT_IDENTITY / MSG_GET
@@ -64,85 +81,67 @@ DAT_IDENTITY / MSG_CLOSEDS
 DAT_STATUS   / MSG_GET
 ```
 
-`tools/SmokeIpcClient/SmokeIpcClient.cpp` connects to the configuration UI's
-Named Pipe server and verifies the C++ IPC client can read the UI state.
+`tools/SmokeIpcClient/SmokeIpcClient.cpp` 连接配置 UI 的命名管道服务器，验证 C++ IPC 客户端可读取 UI 状态。
 
-`tools/FakeScannerPipeServer` can stand in for the UI when testing transfer
-paths:
+`tools/FakeScannerPipeServer` 可在测试传输路径时代替 UI：
 
 ```powershell
 dotnet build .\tools\FakeScannerPipeServer\FakeScannerPipeServer.csproj -c Release
 dotnet .\tools\FakeScannerPipeServer\bin\Release\net10.0\mbfTwain.FakeScannerPipeServer.dll --image .\build\test-assets\page1.bmp --connections 3 --revision 42
 ```
 
-With the fake server already listening, set `MBF_SMOKE_EXPECT_XFERREADY=1` and
-run `SmokeDsEntry.exe` against the built `.ds`. Set `MBF_SMOKE_USE_MEMORY=1` as
-well to exercise `DAT_IMAGEMEMXFER` instead of `DAT_IMAGENATIVEXFER`.
+在伪服务器监听后，设置 `MBF_SMOKE_EXPECT_XFERREADY=1` 并对构建好的 `.ds` 运行 `SmokeDsEntry.exe`。同时设置 `MBF_SMOKE_USE_MEMORY=1` 可测试 `DAT_IMAGEMEMXFER` 而非 `DAT_IMAGENATIVEXFER`。
 
-To exercise the UI-style delayed-ready path, start the fake server with
-`--scan 0 --scan-after-begin-delay-ms 200 --connections 40`, then also set
-`MBF_SMOKE_EXPECT_ENABLE_CALLBACK=1`. That asserts the DS raises
-`DAT_NULL/MSG_XFERREADY` before the first explicit `DAT_EVENT` poll.
+要测试 UI 风格的延迟就绪路径，以 `--scan 0 --scan-after-begin-delay-ms 200 --connections 40` 启动伪服务器，并设置 `MBF_SMOKE_EXPECT_ENABLE_CALLBACK=1`。这将断言 DS 在首次显式 `DAT_EVENT` 轮询之前触发 `DAT_NULL/MSG_XFERREADY`。
 
-## Runtime UI
+## 运行时 UI
 
-When a TWAIN host calls `DAT_USERINTERFACE / MSG_ENABLEDS` with `ShowUI=TRUE`,
-the DS asks the UI process to begin a fresh scan session. If the UI is not
-already running, the DS tries to start `mbfTwain.VirtualScannerConfig.exe` from:
+当 TWAIN 主机以 `ShowUI=TRUE` 调用 `DAT_USERINTERFACE / MSG_ENABLEDS` 时，DS 会请求 UI 进程开始新的扫描会话。如果 UI 尚未运行，DS 会尝试从以下位置启动 `mbfTwain.VirtualScannerConfig.exe`：
 
 ```text
 MBF_TWAIN_UI_EXE
-same directory as mbfVirtualTwainDS.ds
+mbfVirtualTwainDS.ds 所在目录
 src\VirtualScannerConfig\bin\Release\net10.0-windows
 ```
 
-The UI clears the previous image list, shows itself, waits for image selection,
-then sends those images after the user clicks Start Scan. Once image transfer
-to the TWAIN host starts, the DS asks the UI to hide without clearing its
-session state. After the final transfer is acknowledged, the UI clears the list
-and remains hidden until the next scan. If the host sets `CAP_XFERCOUNT` to a
-positive value, the DS only transfers that many images in the current session
-and discards any additional selected images.
+UI 会清空上一次的图像列表，显示自身，等待图像选择，然后在用户点击"开始扫描"后发送这些图像。一旦向 TWAIN 主机的图像传输开始，DS 会要求 UI 隐藏但不清除会话状态。最后一次传输确认后，UI 清空列表并保持隐藏，直到下一次扫描。如果主机将 `CAP_XFERCOUNT` 设为正值，DS 在当前会话中仅传输该数量的图像，并丢弃额外选中的图像。
 
-For an installed TWAIN source, copy the `.ds` file and the
-`mbfTwain.VirtualScannerConfig.*` runtime files into the same TWAIN source
-directory, or set `MBF_TWAIN_UI_EXE` to the full path of
-`mbfTwain.VirtualScannerConfig.exe`.
+对于已安装的 TWAIN 源，将 `.ds` 文件和 `mbfTwain.VirtualScannerConfig.*` 运行时文件复制到同一 TWAIN 源目录，或设置 `MBF_TWAIN_UI_EXE` 指向 `mbfTwain.VirtualScannerConfig.exe` 的完整路径。
 
-## Release Packaging
+## 发布打包
 
-Build and package a release installer with the local Inno Setup 6 installation:
+使用本地 Inno Setup 6 构建并打包发布安装程序：
 
 ```powershell
 .\tools\Build-Release.ps1 -Version 1.0.3 -InnoSetupPath "D:\Program Files (x86)\Inno Setup 6"
 ```
 
-The script reuses `Install-LocalTwain.ps1` in build-only mode, stages both
-Win32 and x64 TWAIN source builds, runs the smoke tests unless `-SkipSmoke` is
-passed, then writes:
+该脚本以仅构建模式复用 `Install-LocalTwain.ps1`，暂存 Win32 与 x64 TWAIN 源构建，运行冒烟测试（除非传入 `-SkipSmoke`），然后生成：
 
 ```text
 build\release\mbfTwain-Setup-v<version>.exe
 build\release\mbfTwain-Setup-v<version>.exe.sha256
 ```
 
-Publish the committed build to GitHub Releases after packaging:
+打包后将提交的构建发布到 GitHub Releases：
 
 ```powershell
 .\tools\Publish-GitHubRelease.ps1 -Version 1.0.3
 ```
 
-The installer copies the DS and UI runtime files into `C:\Windows\twain_32`
-and `C:\Windows\twain_64`, and sets the machine environment variable
-`MBF_TWAIN_FORCE_UI=1`.
+安装程序将 DS 和 UI 运行时文件复制到 `C:\Windows\twain_32` 和 `C:\Windows\twain_64`，并设置机器环境变量 `MBF_TWAIN_FORCE_UI=1`。
 
-## Updates
+## 更新检查
 
-The configuration UI checks `https://api.github.com/repos/mingbingfeng/mbfTWAIN/releases/latest`
-for the newest GitHub Release. The settings dialog contains a **检查更新** button
-that downloads the release installer asset matching `*Setup*.exe` to the user's
-temporary update directory, then starts it with UAC elevation.
+配置 UI 会访问 `https://api.github.com/repos/fengbuming/mbfTWAIN/releases/latest` 检测最新 GitHub Release。设置对话框中的"检查更新"按钮会下载匹配 `*Setup*.exe` 的发布安装程序资产到用户临时更新目录，然后以 UAC 提权启动安装。
 
-If the GitHub repository is private, set `MBF_TWAIN_GITHUB_TOKEN` to a token
-that can read the repository releases before launching the UI. Public releases
-do not require a token.
+如果 GitHub 仓库为私有，请在启动 UI 前设置 `MBF_TWAIN_GITHUB_TOKEN` 为可读取仓库 Release 的令牌。公开 Release 无需令牌。
+
+## 许可证
+
+`mbfTwain` 是源代码可见的非商业使用软件，基于 [PolyForm Noncommercial License 1.0.0](LICENSE) 发布。商业使用需事先获得版权所有者的书面许可。详见 [COMMERCIAL-LICENSE.md](COMMERCIAL-LICENSE.md) 和 [NOTICE](NOTICE)。
+
+## 致谢
+
+- 感谢 [TWAIN Working Group](https://twain.org/) 提供开放的 TWAIN 协议规范与参考实现。
+- 感谢 [shu26.cfd](https://shu26.cfd) 对开源项目的支持与赞助。

@@ -17,8 +17,8 @@ Examples that require commercial permission include:
 
 To request commercial permission, contact the repository owner through:
 
-- GitHub: https://github.com/mingbingfeng
-- Repository issues: https://github.com/mingbingfeng/mbfTWAIN/issues
+- GitHub: https://github.com/fengbuming
+- Repository issues: https://github.com/fengbuming/mbfTWAIN/issues
 
 Any commercial permission must be granted in writing. No commercial
 rights are granted by implication, public availability, forks, downloads,

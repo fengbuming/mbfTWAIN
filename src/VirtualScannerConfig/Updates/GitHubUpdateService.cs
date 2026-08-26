@@ -7,7 +7,7 @@ namespace MbfTwain.VirtualScannerConfig.Updates;
 
 internal sealed class GitHubUpdateService
 {
-    private const string RepositoryOwner = "mingbingfeng";
+    private const string RepositoryOwner = "fengbuming";
     private const string RepositoryName = "mbfTWAIN";
     private static readonly Uri LatestReleaseUri = new($"https://api.github.com/repos/{RepositoryOwner}/{RepositoryName}/releases/latest");
     private static readonly HttpClient HttpClient = CreateHttpClient();
