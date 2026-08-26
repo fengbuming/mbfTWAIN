@@ -8,4 +8,5 @@ internal sealed record ReleaseUpdateInfo(
     Uri? InstallerUri,
     string? InstallerName,
     long? InstallerSize,
+    string? InstallerSha256,
     DateTimeOffset? PublishedAt);

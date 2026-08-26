@@ -1,7 +1,7 @@
 # mbfTwain — 虚拟 TWAIN 扫描仪
 
 [![License: PolyForm Noncommercial](https://img.shields.io/badge/License-PolyForm%20Noncommercial-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-1.0.3-brightgreen.svg)](https://github.com/fengbuming/mbfTWAIN/releases)
+[![Version](https://img.shields.io/badge/version-1.1.0-brightgreen.svg)](https://github.com/fengbuming/mbfTWAIN/releases)
 
 [English](README.en.md) | **中文**
 
@@ -113,7 +113,7 @@ UI 会清空上一次的图像列表，显示自身，等待图像选择，然�
 使用本地 Inno Setup 6 构建并打包发布安装程序：
 
 ```powershell
-.\tools\Build-Release.ps1 -Version 1.0.3 -InnoSetupPath "D:\Program Files (x86)\Inno Setup 6"
+.\tools\Build-Release.ps1 -Version 1.1.0 -InnoSetupPath "D:\Program Files (x86)\Inno Setup 6"
 ```
 
 该脚本以仅构建模式复用 `Install-LocalTwain.ps1`，暂存 Win32 与 x64 TWAIN 源构建，运行冒烟测试（除非传入 `-SkipSmoke`），然后生成：
@@ -126,14 +126,14 @@ build\release\mbfTwain-Setup-v<version>.exe.sha256
 打包后将提交的构建发布到 GitHub Releases：
 
 ```powershell
-.\tools\Publish-GitHubRelease.ps1 -Version 1.0.3
+.\tools\Publish-GitHubRelease.ps1 -Version 1.1.0
 ```
 
 安装程序将 DS 和 UI 运行时文件复制到 `C:\Windows\twain_32` 和 `C:\Windows\twain_64`，并设置机器环境变量 `MBF_TWAIN_FORCE_UI=1`。
 
 ## 更新检查
 
-配置 UI 会访问 `https://api.github.com/repos/fengbuming/mbfTWAIN/releases/latest` 检测最新 GitHub Release。设置对话框中的"检查更新"按钮会下载匹配 `*Setup*.exe` 的发布安装程序资产到用户临时更新目录，然后以 UAC 提权启动安装。
+配置 UI 会先访问 `https://api.github.com/repos/fengbuming/mbfTWAIN/releases/latest` 检测最新 GitHub Release；官方 API 不可达时自动回退到 `gh-proxy.com` 镜像。设置对话框中的"检查更新"按钮会下载匹配 `*Setup*.exe` 的发布安装程序资产到用户临时更新目录，然后以 UAC 提权启动安装。安装包下载同样支持官方直链优先、`ghproxy.net` 与 `gh-proxy.com` 镜像兜底，并在安装前校验 GitHub 返回的 SHA-256 digest。
 
 如果 GitHub 仓库为私有，请在启动 UI 前设置 `MBF_TWAIN_GITHUB_TOKEN` 为可读取仓库 Release 的令牌。公开 Release 无需令牌。
 
