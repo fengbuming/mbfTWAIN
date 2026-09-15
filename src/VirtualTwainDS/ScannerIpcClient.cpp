@@ -263,14 +263,14 @@ bool ScannerIpcClient::Ping(DWORD timeoutMilliseconds) const
     return SendCommand("PING\n", response, timeoutMilliseconds) && response == "OK PONG\n";
 }
 
-bool ScannerIpcClient::BeginScan(DWORD timeoutMilliseconds) const
+bool ScannerIpcClient::BeginScan(DWORD timeoutMilliseconds, DWORD* lastError) const
 {
     std::string response;
-    return SendCommand("BEGIN_SCAN\n", response, timeoutMilliseconds) &&
+    return SendCommand("BEGIN_SCAN\n", response, timeoutMilliseconds, lastError) &&
            response == "OK BEGIN_SCAN\n";
 }
 
-bool ScannerIpcClient::BeginScan(const ScannerIpcState& initialState, DWORD timeoutMilliseconds) const
+bool ScannerIpcClient::BeginScan(const ScannerIpcState& initialState, DWORD timeoutMilliseconds, DWORD* lastError) const
 {
     std::ostringstream command;
     command << "BEGIN_SCAN"
@@ -282,7 +282,7 @@ bool ScannerIpcClient::BeginScan(const ScannerIpcState& initialState, DWORD time
             << "\n";
 
     std::string response;
-    return SendCommand(command.str(), response, timeoutMilliseconds) &&
+    return SendCommand(command.str(), response, timeoutMilliseconds, lastError) &&
            response == "OK BEGIN_SCAN\n";
 }
 
@@ -326,7 +326,8 @@ bool ScannerIpcClient::AcknowledgeScan(std::uint32_t revision, DWORD timeoutMill
 bool ScannerIpcClient::SendCommand(
     const std::string& command,
     std::string& response,
-    DWORD timeoutMilliseconds) const
+    DWORD timeoutMilliseconds,
+    DWORD* lastError) const
 {
     response.clear();
     const std::wstring commandName = CommandName(command);
@@ -357,6 +358,10 @@ bool ScannerIpcClient::SendCommand(
         const ULONGLONG now = GetTickCount64();
         if (now >= deadline)
         {
+            if (lastError != nullptr)
+            {
+                *lastError = error;
+            }
             diagnostics::AppendLine(
                 L"IPC",
                 L"SendCommand timeout while opening pipe command=" + commandName +
@@ -380,6 +385,10 @@ bool ScannerIpcClient::SendCommand(
         }
         else
         {
+            if (lastError != nullptr)
+            {
+                *lastError = error;
+            }
             diagnostics::AppendLine(
                 L"IPC",
                 L"CreateFileW failed command=" + commandName +

@@ -1811,10 +1811,21 @@ bool VirtualTwainDataSource::BeginUiScanSession(const ScannerIpcState& initialSt
 {
     ScannerIpcClient client;
 
-    if (client.BeginScan(initialState, 250))
+    DWORD initialError = ERROR_SUCCESS;
+    if (client.BeginScan(initialState, 250, &initialError))
     {
         diagnostics::AppendLine(L"DS", L"BeginUiScanSession succeeded against existing UI process");
         return true;
+    }
+
+    if (initialError == ERROR_ACCESS_DENIED || initialError == ERROR_PIPE_BUSY)
+    {
+        diagnostics::AppendLine(
+            L"DS",
+            L"Initial BEGIN_SCAN found an existing UI pipe that is not usable (error=" +
+                std::to_wstring(initialError) +
+                L"); not launching a duplicate UI");
+        return false;
     }
 
     diagnostics::AppendLine(L"DS", L"Initial BEGIN_SCAN failed; attempting to launch UI");
@@ -1827,13 +1838,24 @@ bool VirtualTwainDataSource::BeginUiScanSession(const ScannerIpcState& initialSt
 
     for (int attempt = 0; attempt < 50; ++attempt)
     {
-        if (client.BeginScan(initialState, 100))
+        DWORD retryError = ERROR_SUCCESS;
+        if (client.BeginScan(initialState, 100, &retryError))
         {
             diagnostics::AppendLine(
                 L"DS",
                 L"BeginUiScanSession succeeded after launch on attempt " +
                     std::to_wstring(attempt + 1));
             return true;
+        }
+
+        if (retryError == ERROR_ACCESS_DENIED || retryError == ERROR_PIPE_BUSY)
+        {
+            diagnostics::AppendLine(
+                L"DS",
+                L"Retry BEGIN_SCAN found an existing UI pipe that is not usable (error=" +
+                    std::to_wstring(retryError) +
+                    L"); stopping UI launch attempts");
+            return false;
         }
 
         Sleep(100);

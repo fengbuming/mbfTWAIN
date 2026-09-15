@@ -57,6 +57,7 @@ public sealed partial class MainForm : Form
     private ScannerImageSelection[] rememberedImages = [];
     private ReleaseUpdateInfo? latestRelease;
     private TransferProgressDialog? transferProgressDialog;
+    private CancellationTokenSource? pendingExitCancellation;
 
     private readonly FlowLayoutPanel thumbnailStrip = new();
     private readonly LinkLabel clearImagesLink = new();
@@ -87,7 +88,9 @@ public sealed partial class MainForm : Form
             acknowledgedRevision => PostPipeCallback(() => HideScanUi(acknowledgedRevision)),
             acknowledgedRevision => PostPipeCallback(() => AcknowledgeScan(acknowledgedRevision)),
             (progressRevision, completedImages, totalImages) => PostPipeCallback(() =>
-                ApplyTransferProgress(progressRevision, completedImages, totalImages)));
+                ApplyTransferProgress(progressRevision, completedImages, totalImages)),
+            onPipeNameInUse: () => PostPipeCallback(RequestExit),
+            onIdleTimeout: () => PostPipeCallback(RequestExit));
         BuildLayout();
         UpdateSettingsSummary();
         RefreshQueueVisuals();
@@ -996,6 +999,7 @@ public sealed partial class MainForm : Form
             return;
         }
 
+        CancelPendingExit();
         CloseTransferProgressDialog();
         lock (stateLock)
         {
@@ -1099,6 +1103,52 @@ public sealed partial class MainForm : Form
 
         Hide();
         DiagnosticsLog.Write("UI", "HideScanUi applied and window hidden");
+
+        if (acknowledgedRevision == 0)
+        {
+            ScheduleExitAfterSessionEnd();
+        }
+    }
+
+    private void ScheduleExitAfterSessionEnd()
+    {
+        CancelPendingExit();
+        var cancellation = new CancellationTokenSource();
+        pendingExitCancellation = cancellation;
+        DiagnosticsLog.Write("UI", "Session ended; scheduling UI exit in 2 seconds");
+        _ = Task.Delay(TimeSpan.FromSeconds(2), cancellation.Token)
+            .ContinueWith(
+                completed =>
+                {
+                    if (!completed.IsCanceled)
+                    {
+                        PostPipeCallback(RequestExit);
+                    }
+                },
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
+    }
+
+    private void CancelPendingExit()
+    {
+        if (pendingExitCancellation is not null)
+        {
+            pendingExitCancellation.Cancel();
+            pendingExitCancellation.Dispose();
+            pendingExitCancellation = null;
+        }
+    }
+
+    private void RequestExit()
+    {
+        if (IsDisposed || Disposing)
+        {
+            return;
+        }
+
+        DiagnosticsLog.Write("UI", "Exiting UI process");
+        Application.Exit();
     }
 
     private void ApplyTransferProgress(uint progressRevision, int completedImages, int totalImages)

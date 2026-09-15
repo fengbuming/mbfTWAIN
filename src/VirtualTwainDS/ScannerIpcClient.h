@@ -41,8 +41,8 @@ public:
     explicit ScannerIpcClient(std::wstring pipeName = L"mbfTwain.VirtualScanner.v1");
 
     bool Ping(DWORD timeoutMilliseconds = 150) const;
-    bool BeginScan(DWORD timeoutMilliseconds = 150) const;
-    bool BeginScan(const ScannerIpcState& initialState, DWORD timeoutMilliseconds = 150) const;
+    bool BeginScan(DWORD timeoutMilliseconds = 150, DWORD* lastError = nullptr) const;
+    bool BeginScan(const ScannerIpcState& initialState, DWORD timeoutMilliseconds = 150, DWORD* lastError = nullptr) const;
     bool TryGetState(ScannerIpcState& state, DWORD timeoutMilliseconds = 150) const;
     bool ReportTransferProgress(
         std::uint32_t revision,
@@ -56,7 +56,8 @@ private:
     bool SendCommand(
         const std::string& command,
         std::string& response,
-        DWORD timeoutMilliseconds) const;
+        DWORD timeoutMilliseconds,
+        DWORD* lastError = nullptr) const;
 
     std::wstring pipePath_;
 };

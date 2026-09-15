@@ -2,6 +2,7 @@ using System;
 using System.Globalization;
 using System.IO;
 using System.IO.Pipes;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -11,38 +12,54 @@ namespace MbfTwain.VirtualScannerConfig.Ipc;
 public sealed class ScannerPipeServer : IDisposable
 {
     public const string PipeName = "mbfTwain.VirtualScanner.v1";
+    private static readonly TimeSpan IdleTimeout = GetIdleTimeout();
 
     private readonly Func<ScannerStateSnapshot> getSnapshot;
     private readonly Action<ScannerSessionSettings?> beginScan;
     private readonly Action<uint> hideScanUi;
     private readonly Action<uint> acknowledgeScan;
     private readonly Action<uint, int, int> reportTransferProgress;
+    private readonly Action? onPipeNameInUse;
+    private readonly Action? onIdleTimeout;
     private readonly CancellationTokenSource cancellation = new();
+    private System.Threading.Timer? idleTimer;
     private Task? serverTask;
+    private long lastActivityTicks;
+    private int idleExitSignaled;
 
     public ScannerPipeServer(
         Func<ScannerStateSnapshot> getSnapshot,
         Action<ScannerSessionSettings?> beginScan,
         Action<uint> hideScanUi,
         Action<uint> acknowledgeScan,
-        Action<uint, int, int> reportTransferProgress)
+        Action<uint, int, int> reportTransferProgress,
+        Action? onPipeNameInUse = null,
+        Action? onIdleTimeout = null)
     {
         this.getSnapshot = getSnapshot;
         this.beginScan = beginScan;
         this.hideScanUi = hideScanUi;
         this.acknowledgeScan = acknowledgeScan;
         this.reportTransferProgress = reportTransferProgress;
+        this.onPipeNameInUse = onPipeNameInUse;
+        this.onIdleTimeout = onIdleTimeout;
     }
 
     public void Start()
     {
         DiagnosticsLog.Write("UI-IPC", $"Starting pipe server {PipeName}");
-        serverTask ??= Task.Run(() => RunAsync(cancellation.Token));
+        if (serverTask is null)
+        {
+            lastActivityTicks = DateTime.UtcNow.Ticks;
+            serverTask = Task.Run(() => RunAsync(cancellation.Token));
+            idleTimer = new System.Threading.Timer(CheckIdleTimeout, null, IdleTimeout, IdleTimeout);
+        }
     }
 
     public void Dispose()
     {
         cancellation.Cancel();
+        idleTimer?.Dispose();
         try
         {
             serverTask?.Wait(TimeSpan.FromSeconds(2));
@@ -58,18 +75,14 @@ public sealed class ScannerPipeServer : IDisposable
     {
         while (!token.IsCancellationRequested)
         {
-            await using var pipe = new NamedPipeServerStream(
-                PipeName,
-                PipeDirection.InOut,
-                NamedPipeServerStream.MaxAllowedServerInstances,
-                PipeTransmissionMode.Byte,
-                PipeOptions.Asynchronous);
-
+            NamedPipeServerStream? pipe = null;
             try
             {
+                pipe = CreatePipeInstance();
                 DiagnosticsLog.Write("UI-IPC", $"Waiting for connection on {PipeName}");
                 await pipe.WaitForConnectionAsync(token).ConfigureAwait(false);
                 DiagnosticsLog.Write("UI-IPC", "Client connected");
+                MarkActivity();
                 await HandleClientAsync(pipe, token).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (token.IsCancellationRequested)
@@ -77,10 +90,211 @@ public sealed class ScannerPipeServer : IDisposable
                 DiagnosticsLog.Write("UI-IPC", "Pipe server cancellation requested");
                 break;
             }
+            catch (UnauthorizedAccessException)
+            {
+                DiagnosticsLog.Write("UI-IPC", $"Pipe name {PipeName} is already in use by another UI instance; exiting");
+                NotifyPipeNameInUse();
+                break;
+            }
+            catch (IOException exception) when (IsAccessDenied(exception))
+            {
+                DiagnosticsLog.WriteException("UI-IPC", exception, "RunAsync pipe name in use");
+                NotifyPipeNameInUse();
+                break;
+            }
             catch (IOException exception)
             {
                 DiagnosticsLog.WriteException("UI-IPC", exception, "RunAsync");
             }
+            finally
+            {
+                pipe?.Dispose();
+            }
+        }
+    }
+
+    private void CheckIdleTimeout(object? state)
+    {
+        try
+        {
+            long last = Interlocked.Read(ref lastActivityTicks);
+            if (DateTime.UtcNow.Ticks - last > IdleTimeout.Ticks &&
+                Interlocked.CompareExchange(ref idleExitSignaled, 1, 0) == 0)
+            {
+                DiagnosticsLog.Write(
+                    "UI-IPC",
+                    $"Pipe server idle for {IdleTimeout.TotalMinutes:0.#} minutes; exiting");
+                NotifyIdleTimeout();
+            }
+        }
+        catch (Exception exception)
+        {
+            DiagnosticsLog.WriteException("UI-IPC", exception, "CheckIdleTimeout");
+        }
+    }
+
+    private void MarkActivity()
+    {
+        Interlocked.Exchange(ref lastActivityTicks, DateTime.UtcNow.Ticks);
+    }
+
+    private static NamedPipeServerStream CreatePipeInstance()
+    {
+        var pipe = new NamedPipeServerStream(
+            PipeName,
+            PipeDirection.InOut,
+            NamedPipeServerStream.MaxAllowedServerInstances,
+            PipeTransmissionMode.Byte,
+            PipeOptions.Asynchronous);
+
+        // Allow clients of the same user across UAC integrity levels to connect:
+        // grant Everyone/SYSTEM/Administrators read+write and set a Medium
+        // mandatory label so a non-elevated client can also write to the pipe.
+        ApplyPermissiveSecurity(pipe.SafePipeHandle);
+        return pipe;
+    }
+
+    private static void ApplyPermissiveSecurity(Microsoft.Win32.SafeHandles.SafePipeHandle handle)
+    {
+        const string sddl = "D:P(A;;GA;;;WD)(A;;GA;;;SY)(A;;GA;;;BA)(ML;;NW;;;ME)";
+        if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl,
+                1,
+                out IntPtr securityDescriptor,
+                out _))
+        {
+            DiagnosticsLog.Write("UI-IPC", "ApplyPermissiveSecurity failed to convert SDDL");
+            return;
+        }
+
+        try
+        {
+            if (!GetSecurityDescriptorDacl(
+                    securityDescriptor,
+                    out bool daclPresent,
+                    out IntPtr dacl,
+                    out _))
+            {
+                DiagnosticsLog.Write("UI-IPC", "ApplyPermissiveSecurity failed to read DACL");
+                return;
+            }
+
+            if (!GetSecurityDescriptorSacl(
+                    securityDescriptor,
+                    out bool saclPresent,
+                    out IntPtr sacl,
+                    out _))
+            {
+                DiagnosticsLog.Write("UI-IPC", "ApplyPermissiveSecurity failed to read SACL");
+                return;
+            }
+
+            const uint securityInformation =
+                (uint)SecurityInformationFlags.Dacl | (uint)SecurityInformationFlags.Label;
+            uint result = SetSecurityInfo(
+                handle,
+                SeObjectType.KernelObject,
+                securityInformation,
+                IntPtr.Zero,
+                IntPtr.Zero,
+                daclPresent ? dacl : IntPtr.Zero,
+                saclPresent ? sacl : IntPtr.Zero);
+            if (result != 0)
+            {
+                DiagnosticsLog.Write(
+                    "UI-IPC",
+                    "ApplyPermissiveSecurity SetSecurityInfo failed error=" + result);
+            }
+        }
+        finally
+        {
+            LocalFree(securityDescriptor);
+        }
+    }
+
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        string sddl,
+        uint revision,
+        out IntPtr securityDescriptor,
+        out uint securityDescriptorSize);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool GetSecurityDescriptorDacl(
+        IntPtr securityDescriptor,
+        out bool daclPresent,
+        out IntPtr dacl,
+        out bool daclDefaulted);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool GetSecurityDescriptorSacl(
+        IntPtr securityDescriptor,
+        out bool saclPresent,
+        out IntPtr sacl,
+        out bool saclDefaulted);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern uint SetSecurityInfo(
+        System.Runtime.InteropServices.SafeHandle handle,
+        SeObjectType objectType,
+        uint securityInformation,
+        IntPtr owner,
+        IntPtr group,
+        IntPtr dacl,
+        IntPtr sacl);
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr LocalFree(IntPtr memory);
+
+    private enum SeObjectType : uint
+    {
+        KernelObject = 6,
+    }
+
+    [Flags]
+    private enum SecurityInformationFlags : uint
+    {
+        Dacl = 0x4,
+        Label = 0x10,
+    }
+
+    private static bool IsAccessDenied(IOException exception)
+    {
+        return exception.HResult == unchecked((int)0x80070005);
+    }
+
+    private static TimeSpan GetIdleTimeout()
+    {
+        string? raw = Environment.GetEnvironmentVariable("MBF_TWAIN_UI_IDLE_TIMEOUT_MINUTES");
+        if (int.TryParse(raw, NumberStyles.None, CultureInfo.InvariantCulture, out int minutes) && minutes > 0)
+        {
+            return TimeSpan.FromMinutes(minutes);
+        }
+
+        return TimeSpan.FromMinutes(10);
+    }
+
+    private void NotifyPipeNameInUse()
+    {
+        try
+        {
+            onPipeNameInUse?.Invoke();
+        }
+        catch (Exception exception)
+        {
+            DiagnosticsLog.WriteException("UI-IPC", exception, "onPipeNameInUse callback");
+        }
+    }
+
+    private void NotifyIdleTimeout()
+    {
+        try
+        {
+            onIdleTimeout?.Invoke();
+        }
+        catch (Exception exception)
+        {
+            DiagnosticsLog.WriteException("UI-IPC", exception, "onIdleTimeout callback");
         }
     }
 
