@@ -272,6 +272,13 @@ function Build-NativeWin32([string]$ScopeSdk, [string]$MsvcToolRoot, [string]$Ki
 
     Invoke-Checked {
         & $cl /nologo /std:c++17 /EHsc /W4 /WX /O2 /MD /DNDEBUG /DWIN32_LEAN_AND_MEAN /DNOMINMAX `
+            /I"$TwainHeaderDir" /I"$vcInc" /I"$sdkInc\um" /I"$sdkInc\shared" /I"$sdkInc\ucrt" `
+            "$Root\tools\SmokeLegacyDsm\SmokeLegacyDsm.cpp" /Fo"$toolObjDir\SmokeLegacyDsm.obj" /Fe"$outDir\SmokeLegacyDsm.exe" `
+            /link /NOLOGO /SUBSYSTEM:CONSOLE /LIBPATH:"$vcLib" /LIBPATH:"$sdkLib\um\x86" /LIBPATH:"$sdkLib\ucrt\x86" user32.lib
+    } "Win32 SmokeLegacyDsm build"
+
+    Invoke-Checked {
+        & $cl /nologo /std:c++17 /EHsc /W4 /WX /O2 /MD /DNDEBUG /DWIN32_LEAN_AND_MEAN /DNOMINMAX `
             /I"$Root\src\VirtualTwainDS" /I"$TwainHeaderDir" /I"$vcInc" /I"$sdkInc\um" /I"$sdkInc\shared" /I"$sdkInc\ucrt" `
             "$Root\tools\SmokeIpcClient\SmokeIpcClient.cpp" "$Root\src\VirtualTwainDS\ScannerIpcClient.cpp" /Fo"$toolObjDir\\" /Fe"$outDir\SmokeIpcClient.exe" `
             /link /NOLOGO /SUBSYSTEM:CONSOLE /LIBPATH:"$vcLib" /LIBPATH:"$sdkLib\um\x86" /LIBPATH:"$sdkLib\ucrt\x86"
@@ -500,6 +507,46 @@ function Run-UiXferCountSmoke([string]$Platform) {
     }
 }
 
+function Run-LegacyDsmSmoke {
+    $smokePath = Join-Path $Root "build\manual\Win32\$Configuration\SmokeLegacyDsm.exe"
+    $fakeServerDll = Join-Path $Root "tools\FakeScannerPipeServer\bin\$Configuration\net10.0\mbfTwain.FakeScannerPipeServer.dll"
+    $imagePath = Join-Path $Root "build\test-assets\page1.bmp"
+    Assert-File $smokePath "SmokeLegacyDsm missing"
+    Assert-File $fakeServerDll "FakeScannerPipeServer missing"
+    Assert-File $imagePath "Legacy DSM smoke image missing"
+
+    foreach ($mode in @("native", "memory", "cancel")) {
+        $stdoutLog = Join-Path $Root "build\verify-legacy-dsm-$mode.out.log"
+        $stderrLog = Join-Path $Root "build\verify-legacy-dsm-$mode.err.log"
+        $serverArguments = @("`"$fakeServerDll`"", "--scan", "0", "--revision", "168")
+        if ($mode -eq "cancel") {
+            $serverArguments += @("--connections", "4")
+        }
+        else {
+            $serverArguments += @("--image", "`"$imagePath`"", "--scan-after-begin-delay-ms", "200", "--connections", "100")
+        }
+        $server = Start-Process -FilePath "dotnet" -ArgumentList $serverArguments `
+            -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog `
+            -PassThru -WindowStyle Hidden
+        try {
+            Start-Sleep -Milliseconds 150
+            Write-Step "Real Windows DSM1 smoke $mode (no DAT_ENTRYPOINT)"
+            Invoke-WithTemporaryEnvironment @{ MBF_TWAIN_FORCE_UI = "1" } {
+                Invoke-Checked {
+                    if ($mode -eq "native") { & $smokePath }
+                    else { & $smokePath "--$mode" }
+                } "Legacy DSM $mode"
+            }
+        }
+        finally {
+            if (-not $server.HasExited) {
+                Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
+                $server.WaitForExit()
+            }
+        }
+    }
+}
+
 function Install-Platform([string]$Platform, [string]$Destination) {
     $source = Join-Path $Root "build\manual\$Platform\$Configuration"
     Assert-Directory $source "Source build output missing"
@@ -582,6 +629,10 @@ try {
     }
 
     Install-LocalTwain
+
+    if (-not $SkipSmoke) {
+        Run-LegacyDsmSmoke
+    }
 
     Write-Step "Installed files"
     Get-ChildItem C:\Windows\twain_32, C:\Windows\twain_64 -File |

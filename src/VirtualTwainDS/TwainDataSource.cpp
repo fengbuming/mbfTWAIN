@@ -785,6 +785,7 @@ TW_UINT16 VirtualTwainDataSource::HandleUserInterface(
                 L" forceUi=" +
                 std::to_wstring(forceUi ? 1U : 0U));
 
+        EnsureDsmEntryPoint();
         transferReady_ = false;
         transferReadyNotified_ = false;
         ipcSession_.ResetUiFlow();
@@ -1499,6 +1500,36 @@ void VirtualTwainDataSource::CommitTransferReadyFromIpc(ScannerIpcState&& ipcSta
             L" imageCount=" + std::to_wstring(transferSession_.ImageCount()) +
             L" transferDelayMs=" + std::to_wstring(transferSession_.TransferBufferDelayMilliseconds()) +
             L" xferCount=" + std::to_wstring(capabilities_.TransferCount()));
+}
+
+bool VirtualTwainDataSource::EnsureDsmEntryPoint()
+{
+    if (entryPoint_.DSM_Entry != nullptr)
+    {
+        return true;
+    }
+
+    // DSM1 does not send DAT_ENTRYPOINT. Reuse the host's loaded manager;
+    // loading a different DSM would send notifications to another session.
+    const HMODULE legacyDsm = GetModuleHandleW(L"twain_32.dll");
+    if (legacyDsm == nullptr)
+    {
+        diagnostics::AppendLine(L"DS", L"No injected DSM entry point or loaded legacy twain_32.dll");
+        return false;
+    }
+
+    const auto entry = reinterpret_cast<DSMENTRYPROC>(GetProcAddress(legacyDsm, "DSM_Entry"));
+    if (entry == nullptr)
+    {
+        diagnostics::AppendLine(L"DS", L"Loaded legacy DSM does not export DSM_Entry");
+        return false;
+    }
+
+    // The host keeps its DSM loaded for the lifetime of the open source.
+    // Preserve any memory functions supplied through DAT_ENTRYPOINT.
+    entryPoint_.DSM_Entry = entry;
+    diagnostics::AppendLine(L"DS", L"Resolved legacy DSM_Entry from " + ModulePath(legacyDsm));
+    return true;
 }
 
 bool VirtualTwainDataSource::NotifyTransferReady(std::unique_lock<std::mutex>& lock)

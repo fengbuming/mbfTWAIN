@@ -82,6 +82,7 @@ private:
     bool RefreshTransferReadyFromIpc(std::unique_lock<std::mutex>& lock);
     void ApplyScannerSettingsFromIpc(const ScannerIpcState& ipcState);
     void CommitTransferReadyFromIpc(ScannerIpcState&& ipcState);
+    bool EnsureDsmEntryPoint();
     bool NotifyTransferReady(std::unique_lock<std::mutex>& lock);
     void StartTransferReadyWatcher();
     void StopTransferReadyWatcher();
