@@ -1,7 +1,7 @@
 # mbfTwain — Virtual TWAIN Scanner
 
 [![License: PolyForm Noncommercial](https://img.shields.io/badge/License-PolyForm%20Noncommercial-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-1.0.3-brightgreen.svg)](https://github.com/fengbuming/mbfTWAIN/releases)
+[![Version](https://img.shields.io/badge/version-1.2.0-brightgreen.svg)](https://github.com/fengbuming/mbfTWAIN/releases)
 
 **English** | [中文](README.md)
 
@@ -14,7 +14,8 @@ Current progress covers Phase 1 through Phase 4a scaffolding: the native DS modu
 - **Full TWAIN 2.x lifecycle**: Implements the `DS_Entry` entry point, covering the complete Source Loaded → Opened → Enabled → Transfer Ready state machine.
 - **Dual-architecture support**: Ships both Win32 and x64 builds for 32-bit and 64-bit TWAIN host applications.
 - **Native DIB and memory transfer**: Supports both `DAT_IMAGENATIVEXFER` (native DIB) and `DAT_IMAGEMEMXFER` (buffered memory) image transfer modes.
-- **Visual image-selection UI**: A .NET WPF interface for adding, removing, and reordering images — the queue order is the transfer order.
+- **Visual image-selection UI**: A .NET WinForms interface for adding, removing, and reordering images — the queue order is the transfer order.
+- **Large image queues**: 12 images per page with on-demand previews and background network reads. Cancel and resume imports or transfers; retry, skip, or replace unavailable images.
 - **Configurable scan parameters**: Pixel format (GRAY / RGB / BW), paper size (A4 / Letter, etc.), DPI, duplex scanning, and feed interval are all adjustable.
 - **Named Pipe IPC**: The DS and UI process communicate over named pipes, supporting a UI delayed-ready callback path.
 - **Built-in update check**: The configuration UI includes GitHub Release version detection with one-click download and UAC-elevated installation.
@@ -104,7 +105,7 @@ same directory as mbfVirtualTwainDS.ds
 src\VirtualScannerConfig\bin\Release\net10.0-windows
 ```
 
-The UI clears the previous image list, shows itself, waits for image selection, then sends those images after the user clicks Start Scan. Once image transfer to the TWAIN host starts, the DS asks the UI to hide without clearing its session state. After the final transfer is acknowledged, the UI clears the list and remains hidden until the next scan. If the host sets `CAP_XFERCOUNT` to a positive value, the DS only transfers that many images in the current session and discards any additional selected images.
+The UI starts a new image-selection session. When Remember Last Selected Images is enabled, it restores the saved queue in the background and only loads previews for the current page. After Start Scan, it fetches paths in batches and prepares one image at a time. Unavailable images can be retried, skipped, replaced, or the scan can be aborted. Once image transfer to the TWAIN host starts, the DS asks the UI to hide without clearing its session state. After the final transfer is acknowledged, the UI clears the list and remains hidden until the next scan. If the host sets `CAP_XFERCOUNT` to a positive value, the DS only transfers that many images in the current session and discards any additional selected images.
 
 For an installed TWAIN source, copy the `.ds` file and the `mbfTwain.VirtualScannerConfig.*` runtime files into the same TWAIN source directory, or set `MBF_TWAIN_UI_EXE` to the full path of `mbfTwain.VirtualScannerConfig.exe`.
 
@@ -113,7 +114,7 @@ For an installed TWAIN source, copy the `.ds` file and the `mbfTwain.VirtualScan
 Build and package a release installer with the local Inno Setup 6 installation:
 
 ```powershell
-.\tools\Build-Release.ps1 -Version 1.0.3 -InnoSetupPath "D:\Program Files (x86)\Inno Setup 6"
+.\tools\Build-Release.ps1 -Version 1.2.0 -InnoSetupPath "D:\Program Files (x86)\Inno Setup 6"
 ```
 
 The script reuses `Install-LocalTwain.ps1` in build-only mode, stages both Win32 and x64 TWAIN source builds, runs the smoke tests unless `-SkipSmoke` is passed, then writes:
@@ -126,7 +127,7 @@ build\release\mbfTwain-Setup-v<version>.exe.sha256
 Publish the committed build to GitHub Releases after packaging:
 
 ```powershell
-.\tools\Publish-GitHubRelease.ps1 -Version 1.0.3
+.\tools\Publish-GitHubRelease.ps1 -Version 1.2.0
 ```
 
 The installer copies the DS and UI runtime files into `C:\Windows\twain_32` and `C:\Windows\twain_64`, and sets the machine environment variable `MBF_TWAIN_FORCE_UI=1`.

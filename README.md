@@ -1,7 +1,7 @@
 # mbfTwain — 虚拟 TWAIN 扫描仪
 
 [![License: PolyForm Noncommercial](https://img.shields.io/badge/License-PolyForm%20Noncommercial-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-1.1.0-brightgreen.svg)](https://github.com/fengbuming/mbfTWAIN/releases)
+[![Version](https://img.shields.io/badge/version-1.2.0-brightgreen.svg)](https://github.com/fengbuming/mbfTWAIN/releases)
 
 [English](README.en.md) | **中文**
 
@@ -14,7 +14,8 @@
 - **完整 TWAIN 2.x 生命周期**：实现 `DS_Entry` 入口，覆盖 Source Loaded → Opened → Enabled → Transfer Ready 全状态机
 - **双架构支持**：同时提供 Win32 与 x64 构建，适配 32 位 / 64 位 TWAIN 主机应用
 - **原生 DIB 与内存传输**：支持 `DAT_IMAGENATIVEXFER`（原生 DIB）与 `DAT_IMAGEMEMXFER`（缓冲内存）两种图像传输模式
-- **可视化图像选择 UI**：.NET WPF 界面支持添加、删除、重排图像，队列顺序即扫描传输顺序
+- **可视化图像选择 UI**：.NET WinForms 界面支持添加、删除、重排图像，队列顺序即扫描传输顺序
+- **大批量图片处理**：每页 12 张、当前页按需预览，后台读取网络图片；导入和送图支持取消后继续，异常图片可重试、跳过或更换
 - **可配置扫描参数**：像素格式（GRAY / RGB / BW）、纸张尺寸（A4 / Letter 等）、DPI、双面扫描、送纸间隔均可调
 - **Named Pipe IPC**：DS 与 UI 进程通过命名管道通信，支持 UI 延迟就绪（delayed-ready）回调路径
 - **自动更新检查**：配置 UI 内置 GitHub Release 版本检测，一键下载并以 UAC 提权安装更新
@@ -104,7 +105,7 @@ mbfVirtualTwainDS.ds 所在目录
 src\VirtualScannerConfig\bin\Release\net10.0-windows
 ```
 
-UI 会清空上一次的图像列表，显示自身，等待图像选择，然后在用户点击"开始扫描"后发送这些图像。一旦向 TWAIN 主机的图像传输开始，DS 会要求 UI 隐藏但不清除会话状态。最后一次传输确认后，UI 清空列表并保持隐藏，直到下一次扫描。如果主机将 `CAP_XFERCOUNT` 设为正值，DS 在当前会话中仅传输该数量的图像，并丢弃额外选中的图像。
+UI 会开始新的图片选择会话；勾选“记住最后选择的图片”时，在后台恢复上次队列并仅加载当前页预览。用户点击“开始扫描”后，按批获取路径并逐张准备和发送图片。读取失败时可选择重试、跳过、更换或中止。一旦向 TWAIN 主机的图像传输开始，DS 会要求 UI 隐藏但不清除会话状态。最后一次传输确认后，UI 清空列表并保持隐藏，直到下一次扫描。如果主机将 `CAP_XFERCOUNT` 设为正值，DS 在当前会话中仅传输该数量的图像，并丢弃额外选中的图像。
 
 对于已安装的 TWAIN 源，将 `.ds` 文件和 `mbfTwain.VirtualScannerConfig.*` 运行时文件复制到同一 TWAIN 源目录，或设置 `MBF_TWAIN_UI_EXE` 指向 `mbfTwain.VirtualScannerConfig.exe` 的完整路径。
 
@@ -113,7 +114,7 @@ UI 会清空上一次的图像列表，显示自身，等待图像选择，然�
 使用本地 Inno Setup 6 构建并打包发布安装程序：
 
 ```powershell
-.\tools\Build-Release.ps1 -Version 1.1.0 -InnoSetupPath "D:\Program Files (x86)\Inno Setup 6"
+.\tools\Build-Release.ps1 -Version 1.2.0 -InnoSetupPath "D:\Program Files (x86)\Inno Setup 6"
 ```
 
 该脚本以仅构建模式复用 `Install-LocalTwain.ps1`，暂存 Win32 与 x64 TWAIN 源构建，运行冒烟测试（除非传入 `-SkipSmoke`），然后生成：
@@ -126,7 +127,7 @@ build\release\mbfTwain-Setup-v<version>.exe.sha256
 打包后将提交的构建发布到 GitHub Releases：
 
 ```powershell
-.\tools\Publish-GitHubRelease.ps1 -Version 1.1.0
+.\tools\Publish-GitHubRelease.ps1 -Version 1.2.0
 ```
 
 安装程序将 DS 和 UI 运行时文件复制到 `C:\Windows\twain_32` 和 `C:\Windows\twain_64`，并设置机器环境变量 `MBF_TWAIN_FORCE_UI=1`。
