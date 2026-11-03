@@ -92,6 +92,37 @@ std::string WideToUtf8(const std::wstring& value)
     return result;
 }
 
+bool TransferPipeBytes(HANDLE pipe, bool writing, void* buffer, DWORD length,
+    DWORD& transferred, ULONGLONG deadline, DWORD& error)
+{
+    OVERLAPPED operation{};
+    operation.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (operation.hEvent == nullptr) { error = GetLastError(); return false; }
+    const BOOL started = writing
+        ? WriteFile(pipe, buffer, length, &transferred, &operation)
+        : ReadFile(pipe, buffer, length, &transferred, &operation);
+    bool success = started != FALSE;
+    error = success ? ERROR_SUCCESS : GetLastError();
+    if (!success && error == ERROR_IO_PENDING)
+    {
+        const ULONGLONG now = GetTickCount64();
+        const DWORD remaining = now >= deadline ? 0U : static_cast<DWORD>((std::min)(deadline - now, 0xfffffffeULL));
+        if (WaitForSingleObject(operation.hEvent, remaining) == WAIT_OBJECT_0)
+        {
+            success = GetOverlappedResult(pipe, &operation, &transferred, FALSE) != FALSE;
+            error = success ? ERROR_SUCCESS : GetLastError();
+        }
+        else
+        {
+            CancelIoEx(pipe, &operation);
+            WaitForSingleObject(operation.hEvent, INFINITE);
+            error = ERROR_TIMEOUT;
+        }
+    }
+    CloseHandle(operation.hEvent);
+    return success;
+}
+
 bool ParseUInt32(std::string_view text, std::uint32_t& value) noexcept
 {
     std::string owned(text);
@@ -195,7 +226,23 @@ bool ParseStateResponse(const std::string& response, mbf::twain::ScannerIpcState
 
         std::uint32_t number = 0;
         bool boolean = false;
-        if (StartsWith(line, kRevision) && ParseUInt32(std::string_view(line).substr(kRevision.size()), number))
+        if (StartsWith(line, "totalImages ") && ParseUInt32(std::string_view(line).substr(12), number))
+        {
+            parsed.totalImages = number;
+        }
+        else if (StartsWith(line, "offset ") && ParseUInt32(std::string_view(line).substr(7), number))
+        {
+            parsed.imageOffset = number;
+        }
+        else if (line == "paged 1")
+        {
+            parsed.pagedImages = true;
+        }
+        else if (StartsWith(line, "paused ") && ParseBool(std::string_view(line).substr(7), boolean))
+        {
+            parsed.transferPaused = boolean;
+        }
+        else if (StartsWith(line, kRevision) && ParseUInt32(std::string_view(line).substr(kRevision.size()), number))
         {
             parsed.revision = number;
         }
@@ -243,6 +290,9 @@ bool ParseStateResponse(const std::string& response, mbf::twain::ScannerIpcState
         return false;
     }
 
+    if (!parsed.pagedImages) parsed.totalImages = static_cast<std::uint32_t>(parsed.selectedImages.size());
+    if (parsed.totalImages > 100000U || parsed.imageOffset > parsed.totalImages ||
+        parsed.selectedImages.size() > parsed.totalImages - parsed.imageOffset) return false;
     state = std::move(parsed);
     return true;
 }
@@ -291,6 +341,30 @@ bool ScannerIpcClient::TryGetState(ScannerIpcState& state, DWORD timeoutMillisec
     std::string response;
     return SendCommand("GET_STATE\n", response, timeoutMilliseconds) &&
            ParseStateResponse(response, state);
+}
+
+bool ScannerIpcClient::TryGetImagePage(std::uint32_t revision, std::uint32_t offset, std::uint32_t count,
+    ScannerIpcState& state, DWORD timeoutMilliseconds) const
+{
+    std::string response;
+    const std::string command = "GET_IMAGE_PAGE " + std::to_string(revision) + " " +
+        std::to_string(offset) + " " + std::to_string(count) + "\n";
+    return SendCommand(command, response, timeoutMilliseconds) && ParseStateResponse(response, state) &&
+        state.revision == revision && state.imageOffset == offset && state.selectedImages.size() <= count;
+}
+
+bool ScannerIpcClient::TryPrepareImage(std::uint32_t revision, std::uint32_t index, std::wstring& path, bool& skip,
+    DWORD timeoutMilliseconds) const
+{
+    std::string response;
+    skip = false;
+    if (!SendCommand("GET_TRANSFER_IMAGE " + std::to_string(revision) + " " + std::to_string(index) + "\n",
+        response, timeoutMilliseconds)) return false;
+    if (response == "OK SKIP\n") { skip = true; return true; }
+    if (!StartsWith(response, "OK IMAGE ")) return false;
+    const size_t end = response.find_first_of("\r\n", 9);
+    path = Utf8ToWide(response.substr(9, end == std::string::npos ? end : end - 9));
+    return !path.empty();
 }
 
 bool ScannerIpcClient::ReportTransferProgress(
@@ -347,7 +421,7 @@ bool ScannerIpcClient::SendCommand(
             0,
             nullptr,
             OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED,
             nullptr);
         if (pipe != INVALID_HANDLE_VALUE)
         {
@@ -401,23 +475,10 @@ bool ScannerIpcClient::SendCommand(
     diagnostics::AppendLine(L"IPC", L"Connected to pipe for command=" + commandName);
 
     DWORD bytesWritten = 0;
-    const auto bytesToWrite = static_cast<DWORD>(command.size());
-    const BOOL writeOk = WriteFile(
-        pipe,
-        command.data(),
-        bytesToWrite,
-        &bytesWritten,
-        nullptr);
-    if (!writeOk || bytesWritten != bytesToWrite)
+    DWORD error = ERROR_SUCCESS;
+    if (!TransferPipeBytes(pipe, true, const_cast<char*>(command.data()), static_cast<DWORD>(command.size()),
+        bytesWritten, deadline, error) || bytesWritten != command.size())
     {
-        const DWORD error = writeOk ? ERROR_WRITE_FAULT : GetLastError();
-        diagnostics::AppendLine(
-            L"IPC",
-            L"WriteFile failed command=" + commandName +
-                L" bytesWritten=" + std::to_wstring(bytesWritten) +
-                L" expected=" + std::to_wstring(bytesToWrite) +
-                L" error=" + std::to_wstring(error) +
-                L" (" + diagnostics::FormatWindowsError(error) + L")");
         CloseHandle(pipe);
         return false;
     }
@@ -426,38 +487,22 @@ bool ScannerIpcClient::SendCommand(
     for (;;)
     {
         DWORD bytesRead = 0;
-        const BOOL readOk = ReadFile(
-            pipe,
-            buffer.data(),
-            static_cast<DWORD>(buffer.size()),
-            &bytesRead,
-            nullptr);
-        if (!readOk)
+        if (!TransferPipeBytes(pipe, false, buffer.data(), static_cast<DWORD>(buffer.size()), bytesRead, deadline, error))
         {
-            const DWORD error = GetLastError();
+            diagnostics::AppendLine(L"IPC", L"Read completed command=" + commandName +
+                L" error=" + std::to_wstring(error) + L" response=" + ResponseSnippet(response));
             CloseHandle(pipe);
-            diagnostics::AppendLine(
-                L"IPC",
-                L"ReadFile finished command=" + commandName +
-                    L" error=" + std::to_wstring(error) +
-                    L" (" + diagnostics::FormatWindowsError(error) + L")" +
-                    L" responseBytes=" + std::to_wstring(response.size()));
             return error == ERROR_BROKEN_PIPE && !response.empty();
         }
-        if (bytesRead == 0)
-        {
-            break;
-        }
-
+        if (bytesRead == 0) break;
         response.append(buffer.data(), bytesRead);
+        if (response.size() > 4U * 1024U * 1024U)
+        {
+            CloseHandle(pipe);
+            return false;
+        }
     }
-
     CloseHandle(pipe);
-    diagnostics::AppendLine(
-        L"IPC",
-        L"SendCommand success command=" + commandName +
-            L" responseBytes=" + std::to_wstring(response.size()) +
-            L" responseSnippet=" + ResponseSnippet(response));
     return !response.empty();
 }
 

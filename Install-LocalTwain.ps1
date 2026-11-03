@@ -237,6 +237,13 @@ function Build-NativeX64([string]$ScopeSdk) {
 
     Invoke-Checked {
         & $cl /nologo /std:c++17 /EHsc /W4 /WX /O2 /MD /DNDEBUG /DWIN32_LEAN_AND_MEAN /DNOMINMAX `
+            /I"$TwainHeaderDir" /I"$vc\include" /I"$sdk\include\um" /I"$sdk\include\shared" /I"$sdk\include\ucrt" `
+            "$Root\tests\SmokePagedTransfer\SmokePagedTransfer.cpp" /Fo"$toolObjDir\SmokePagedTransfer.obj" /Fe"$outDir\SmokePagedTransfer.exe" `
+            /link /NOLOGO /SUBSYSTEM:CONSOLE /LIBPATH:"$vc\lib" /LIBPATH:"$sdk\lib"
+    } "x64 paged transfer smoke build"
+
+    Invoke-Checked {
+        & $cl /nologo /std:c++17 /EHsc /W4 /WX /O2 /MD /DNDEBUG /DWIN32_LEAN_AND_MEAN /DNOMINMAX `
             /I"$Root\src\VirtualTwainDS" /I"$TwainHeaderDir" /I"$vc\include" /I"$sdk\include\um" /I"$sdk\include\shared" /I"$sdk\include\ucrt" `
             "$Root\tools\SmokeIpcClient\SmokeIpcClient.cpp" "$Root\src\VirtualTwainDS\ScannerIpcClient.cpp" /Fo"$toolObjDir\\" /Fe"$outDir\SmokeIpcClient.exe" `
             /link /NOLOGO /SUBSYSTEM:CONSOLE /LIBPATH:"$vc\lib" /LIBPATH:"$sdk\lib"
@@ -269,6 +276,13 @@ function Build-NativeWin32([string]$ScopeSdk, [string]$MsvcToolRoot, [string]$Ki
             "$Root\tools\SmokeDsEntry\SmokeDsEntry.cpp" /Fo"$toolObjDir\SmokeDsEntry.obj" /Fe"$outDir\SmokeDsEntry.exe" `
             /link /NOLOGO /SUBSYSTEM:CONSOLE /LIBPATH:"$vcLib" /LIBPATH:"$sdkLib\um\x86" /LIBPATH:"$sdkLib\ucrt\x86"
     } "Win32 SmokeDsEntry build"
+
+    Invoke-Checked {
+        & $cl /nologo /std:c++17 /EHsc /W4 /WX /O2 /MD /DNDEBUG /DWIN32_LEAN_AND_MEAN /DNOMINMAX `
+            /I"$TwainHeaderDir" /I"$vcInc" /I"$sdkInc\um" /I"$sdkInc\shared" /I"$sdkInc\ucrt" `
+            "$Root\tests\SmokePagedTransfer\SmokePagedTransfer.cpp" /Fo"$toolObjDir\SmokePagedTransfer.obj" /Fe"$outDir\SmokePagedTransfer.exe" `
+            /link /NOLOGO /SUBSYSTEM:CONSOLE /LIBPATH:"$vcLib" /LIBPATH:"$sdkLib\um\x86" /LIBPATH:"$sdkLib\ucrt\x86"
+    } "Win32 paged transfer smoke build"
 
     Invoke-Checked {
         & $cl /nologo /std:c++17 /EHsc /W4 /WX /O2 /MD /DNDEBUG /DWIN32_LEAN_AND_MEAN /DNOMINMAX `

@@ -96,6 +96,7 @@ private:
     bool FillExtendedImageInfo(TW_UINT32 imageIndex, pTW_EXTIMAGEINFO extendedImageInfo) const noexcept;
     bool TryResolveImageInfoIndex(TW_UINT32& imageIndex) const noexcept;
     bool EnsureMemoryTransferReady(std::unique_lock<std::mutex>& lock);
+    bool ResolveTransferImage(TW_UINT32& index, ScannerIpcImage& image, std::unique_lock<std::mutex>& lock);
     void ResetMemoryTransfer() noexcept;
     bool IsUiStopRequested(std::unique_lock<std::mutex>& lock);
     bool CompleteTransferIfUiStopped(std::unique_lock<std::mutex>& lock);

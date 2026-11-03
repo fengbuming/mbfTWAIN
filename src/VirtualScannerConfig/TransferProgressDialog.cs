@@ -10,8 +10,18 @@ internal sealed class TransferProgressDialog : Form
     private readonly Label detailLabel = new();
     private readonly ProgressBar progressBar = new();
     private readonly Button cancelButton = new();
+    private readonly Button continueButton = new();
+    private readonly Button abortButton = new();
+    private readonly Button skipButton = new();
+    private readonly Button replaceButton = new();
+    private bool paused;
+    private string? issueMessage;
 
     public event EventHandler? CancelRequested;
+    public event EventHandler? ContinueRequested;
+    public event EventHandler? AbortRequested;
+    public event EventHandler? SkipRequested;
+    public event EventHandler? ReplaceRequested;
 
     public TransferProgressDialog()
     {
@@ -22,7 +32,7 @@ internal sealed class TransferProgressDialog : Form
         MaximizeBox = false;
         ControlBox = false;
         ShowInTaskbar = false;
-        ClientSize = new Size(380, 156);
+        ClientSize = new Size(620, 232);
         BackColor = Color.FromArgb(255, 255, 252);
 
         var layout = new TableLayoutPanel
@@ -52,6 +62,7 @@ internal sealed class TransferProgressDialog : Form
         layout.Controls.Add(progressBar, 0, 1);
 
         detailLabel.AutoSize = true;
+        detailLabel.MaximumSize = new Size(580, 86);
         detailLabel.ForeColor = Color.FromArgb(94, 104, 97);
         detailLabel.Margin = new Padding(0, 0, 0, 12);
         layout.Controls.Add(detailLabel, 0, 2);
@@ -63,11 +74,33 @@ internal sealed class TransferProgressDialog : Form
             AutoSize = true,
             Margin = new Padding(0),
         };
-        cancelButton.Text = "停止扫描";
-        cancelButton.Width = 92;
+        cancelButton.Text = "取消（可继续）";
+        cancelButton.Width = 118;
         cancelButton.Height = 30;
         cancelButton.Click += (_, _) => CancelRequested?.Invoke(this, EventArgs.Empty);
         buttonPanel.Controls.Add(cancelButton);
+        continueButton.Text = "继续";
+        continueButton.Width = 82;
+        continueButton.Height = 30;
+        continueButton.Enabled = false;
+        continueButton.Click += (_, _) => ContinueRequested?.Invoke(this, EventArgs.Empty);
+        buttonPanel.Controls.Add(continueButton);
+        abortButton.Text = "中止本次扫描";
+        abortButton.Width = 118;
+        abortButton.Height = 30;
+        abortButton.Click += (_, _) => AbortRequested?.Invoke(this, EventArgs.Empty);
+        buttonPanel.Controls.Add(abortButton);
+        skipButton.Text = "跳过此图继续";
+        replaceButton.Text = "更换此图";
+        foreach (Button button in new[] { skipButton, replaceButton })
+        {
+            button.Width = 104;
+            button.Height = 30;
+            button.Visible = false;
+            buttonPanel.Controls.Add(button);
+        }
+        skipButton.Click += (_, _) => SkipRequested?.Invoke(this, EventArgs.Empty);
+        replaceButton.Click += (_, _) => ReplaceRequested?.Invoke(this, EventArgs.Empty);
         layout.Controls.Add(buttonPanel, 0, 3);
 
         Controls.Add(layout);
@@ -89,5 +122,28 @@ internal sealed class TransferProgressDialog : Form
             ? progressBar.Maximum
             : (int)Math.Round(normalizedCompleted * (progressBar.Maximum / (double)normalizedTotal));
         cancelButton.Enabled = !complete;
+    }
+
+    public void SetPaused(bool value, string? message = null, bool imageFailed = false)
+    {
+        bool changed = paused != value;
+        paused = value;
+        cancelButton.Enabled = !value;
+        continueButton.Enabled = value;
+        continueButton.Text = imageFailed ? "重试此图" : "继续";
+        skipButton.Visible = value && imageFailed;
+        replaceButton.Visible = value && imageFailed;
+        if (value)
+        {
+            titleLabel.Text = "送图已暂停";
+            if (message is not null) issueMessage = message;
+            if (issueMessage is not null) detailLabel.Text = issueMessage;
+            else if (changed) detailLabel.Text += " · 继续将从未完成的页面开始";
+        }
+        else
+        {
+            issueMessage = null;
+            if (changed) titleLabel.Text = "正在继续送图…";
+        }
     }
 }

@@ -32,6 +32,10 @@ struct ScannerIpcState
     std::uint32_t yResolution = 300;
     std::uint32_t transferBufferDelayMilliseconds = 100;
     bool scanRequested = false;
+    bool pagedImages = false;
+    bool transferPaused = false;
+    std::uint32_t totalImages = 0;
+    std::uint32_t imageOffset = 0;
     std::vector<ScannerIpcImage> selectedImages;
 };
 
@@ -44,6 +48,10 @@ public:
     bool BeginScan(DWORD timeoutMilliseconds = 150, DWORD* lastError = nullptr) const;
     bool BeginScan(const ScannerIpcState& initialState, DWORD timeoutMilliseconds = 150, DWORD* lastError = nullptr) const;
     bool TryGetState(ScannerIpcState& state, DWORD timeoutMilliseconds = 150) const;
+    bool TryGetImagePage(std::uint32_t revision, std::uint32_t offset, std::uint32_t count,
+        ScannerIpcState& state, DWORD timeoutMilliseconds = 150) const;
+    bool TryPrepareImage(std::uint32_t revision, std::uint32_t index, std::wstring& path, bool& skip,
+        DWORD timeoutMilliseconds = 150) const;
     bool ReportTransferProgress(
         std::uint32_t revision,
         std::uint32_t completedImages,

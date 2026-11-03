@@ -15,6 +15,8 @@ public sealed class ScannerPipeServer : IDisposable
     private static readonly TimeSpan IdleTimeout = GetIdleTimeout();
 
     private readonly Func<ScannerStateSnapshot> getSnapshot;
+    private readonly Func<int, int, ScannerStateSnapshot>? getPageSnapshot;
+    private readonly Func<uint, int, string>? getTransferImage;
     private readonly Action<ScannerSessionSettings?> beginScan;
     private readonly Action<uint> hideScanUi;
     private readonly Action<uint> acknowledgeScan;
@@ -34,9 +36,13 @@ public sealed class ScannerPipeServer : IDisposable
         Action<uint> acknowledgeScan,
         Action<uint, int, int> reportTransferProgress,
         Action? onPipeNameInUse = null,
-        Action? onIdleTimeout = null)
+        Action? onIdleTimeout = null,
+        Func<int, int, ScannerStateSnapshot>? getPageSnapshot = null,
+        Func<uint, int, string>? getTransferImage = null)
     {
         this.getSnapshot = getSnapshot;
+        this.getPageSnapshot = getPageSnapshot;
+        this.getTransferImage = getTransferImage;
         this.beginScan = beginScan;
         this.hideScanUi = hideScanUi;
         this.acknowledgeScan = acknowledgeScan;
@@ -326,11 +332,44 @@ public sealed class ScannerPipeServer : IDisposable
 
         if (string.Equals(command, "GET_STATE", StringComparison.Ordinal))
         {
-            ScannerStateSnapshot snapshot = getSnapshot();
+            ScannerStateSnapshot snapshot = getPageSnapshot?.Invoke(0, 0) ?? getSnapshot();
             DiagnosticsLog.Write(
                 "UI-IPC",
                 $"GET_STATE revision={snapshot.Revision} scan={snapshot.ScanRequested} images={snapshot.SelectedImages.Count} pixel={snapshot.PixelType} paper={snapshot.PaperSize} xres={snapshot.XResolution} yres={snapshot.YResolution}");
             await WriteStateAsync(writer, snapshot).ConfigureAwait(false);
+            return;
+        }
+
+        if (command.StartsWith("GET_IMAGE_PAGE ", StringComparison.Ordinal))
+        {
+            string[] parts = command.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            if (getPageSnapshot is null || parts.Length != 4 ||
+                !uint.TryParse(parts[1], NumberStyles.None, CultureInfo.InvariantCulture, out uint requestedRevision) ||
+                !int.TryParse(parts[2], NumberStyles.None, CultureInfo.InvariantCulture, out int offset) ||
+                !int.TryParse(parts[3], NumberStyles.None, CultureInfo.InvariantCulture, out int count) ||
+                offset < 0 || count < 1 || count > 32)
+            {
+                await writer.WriteAsync("ERR invalid-page\n").ConfigureAwait(false);
+                return;
+            }
+            ScannerStateSnapshot page = getPageSnapshot(offset, count);
+            if (!page.ScanRequested || page.Revision != requestedRevision || offset >= page.TotalImageCount)
+            {
+                await writer.WriteAsync("ERR stale-session\n").ConfigureAwait(false);
+                return;
+            }
+            await WriteStateAsync(writer, page).ConfigureAwait(false);
+            return;
+        }
+
+        if (command.StartsWith("GET_TRANSFER_IMAGE ", StringComparison.Ordinal))
+        {
+            string[] parts = command.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            string reply = parts.Length == 3 && getTransferImage is not null &&
+                uint.TryParse(parts[1], NumberStyles.None, CultureInfo.InvariantCulture, out uint imageRevision) &&
+                int.TryParse(parts[2], NumberStyles.None, CultureInfo.InvariantCulture, out int imageIndex) && imageIndex >= 0
+                ? getTransferImage(imageRevision, imageIndex) : "ERR invalid-image\n";
+            await writer.WriteAsync(reply).ConfigureAwait(false);
             return;
         }
 
@@ -390,6 +429,13 @@ public sealed class ScannerPipeServer : IDisposable
         await writer.WriteLineAsync(FormattableString.Invariant($"yres {snapshot.YResolution}")).ConfigureAwait(false);
         await writer.WriteLineAsync(FormattableString.Invariant($"transferDelayMs {snapshot.TransferBufferDelayMilliseconds}")).ConfigureAwait(false);
         await writer.WriteLineAsync(FormattableString.Invariant($"scan {(snapshot.ScanRequested ? 1 : 0)}")).ConfigureAwait(false);
+        if (snapshot.PagedImages)
+        {
+            await writer.WriteLineAsync($"paged 1").ConfigureAwait(false);
+            await writer.WriteLineAsync(FormattableString.Invariant($"totalImages {snapshot.TotalImageCount}")).ConfigureAwait(false);
+            await writer.WriteLineAsync(FormattableString.Invariant($"offset {snapshot.ImageOffset}")).ConfigureAwait(false);
+            await writer.WriteLineAsync($"paused {(snapshot.TransferPaused ? 1 : 0)}").ConfigureAwait(false);
+        }
         foreach (ScannerImageSelection image in snapshot.SelectedImages)
         {
             await writer

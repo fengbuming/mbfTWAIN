@@ -28,6 +28,11 @@ public:
         std::vector<ScannerIpcImage>&& images,
         std::uint32_t transferBufferDelayMilliseconds);
     void Clear() noexcept;
+    void BeginPaged(std::uint32_t revision, std::uint32_t totalImages, std::uint32_t delay);
+    bool PagedImages() const noexcept { return pagedImages_; }
+    void CachePage(std::uint32_t offset, const std::vector<ScannerIpcImage>& images);
+    void CachePreparedPath(TW_UINT32 index, std::wstring path);
+    const std::wstring& PreparedPath(TW_UINT32 index) const noexcept;
     void DiscardImages() noexcept;
 
     std::uint32_t Revision() const noexcept { return revision_; }
@@ -74,6 +79,9 @@ private:
         TW_UINT32 nextRow = 0;
         RasterImage image{};
     };
+    bool pagedImages_ = false;
+    TW_UINT32 preparedIndex_ = 0;
+    std::wstring preparedPath_;
 
     std::uint32_t revision_ = 0;
     std::uint32_t transferBufferDelayMilliseconds_ = 100;

@@ -1101,6 +1101,7 @@ TW_UINT16 VirtualTwainDataSource::HandleImageInfo(
     if (!TryResolveImageInfoIndex(imageIndex) ||
         !FillImageInfo(imageIndex, imageInfo, lock))
     {
+        if (transferSession_.PagedImages() && !transferSession_.HasPendingImage()) return TWRC_CANCEL;
         return Fail(TWCC_OPERATIONERROR);
     }
 
@@ -1167,8 +1168,15 @@ TW_UINT16 VirtualTwainDataSource::HandleImageNativeTransfer(
     }
 
     DecodedImageInfo decodedInfo{};
-    const TW_UINT32 imageIndex = transferSession_.PendingImageIndex();
-    const ScannerIpcImage selectedImage = transferSession_.PendingImage();
+    TW_UINT32 imageIndex = transferSession_.PendingImageIndex();
+    const std::uint32_t imageRevision = transferSession_.Revision();
+    ScannerIpcImage selectedImage;
+    if (!ResolveTransferImage(imageIndex, selectedImage, lock))
+    {
+        *outputHandle = nullptr;
+        if (CompleteTransferIfUiStopped(lock) || !transferSession_.HasPendingImage()) return TWRC_CANCEL;
+        return Fail(TWCC_OPERATIONERROR);
+    }
     const TW_UINT16 pixelType = capabilities_.PixelType();
     const std::uint32_t xResolution = Fix32WholeOrDefault(capabilities_.XResolution(), 300);
     const std::uint32_t yResolution = Fix32WholeOrDefault(capabilities_.YResolution(), 300);
@@ -1176,6 +1184,7 @@ TW_UINT16 VirtualTwainDataSource::HandleImageNativeTransfer(
     ReportTransferProgress(lock, imageIndex);
     if (state_ != TwainState::TransferReady ||
         transferSession_.PendingImageIndex() != imageIndex ||
+        transferSession_.Revision() != imageRevision ||
         !transferSession_.MatchesImage(imageIndex, selectedImage) ||
         capabilities_.PixelType() != pixelType ||
         Fix32WholeOrDefault(capabilities_.XResolution(), 300) != xResolution ||
@@ -1201,6 +1210,7 @@ TW_UINT16 VirtualTwainDataSource::HandleImageNativeTransfer(
 
     if (state_ != TwainState::TransferReady ||
         transferSession_.PendingImageIndex() != imageIndex ||
+        transferSession_.Revision() != imageRevision ||
         !transferSession_.MatchesImage(imageIndex, selectedImage) ||
         capabilities_.PixelType() != pixelType ||
         Fix32WholeOrDefault(capabilities_.XResolution(), 300) != xResolution ||
@@ -1210,6 +1220,12 @@ TW_UINT16 VirtualTwainDataSource::HandleImageNativeTransfer(
         return Fail(TWCC_SEQERROR);
     }
 
+    if (CompleteTransferIfUiStopped(lock))
+    {
+        GlobalFree(dib);
+        *outputHandle = nullptr;
+        return TWRC_CANCEL;
+    }
     *outputHandle = dib;
     transferSession_.AdvancePendingImage();
     transferSession_.MarkCurrentImage(imageIndex);
@@ -1260,6 +1276,7 @@ TW_UINT16 VirtualTwainDataSource::HandleImageMemoryTransfer(
 
     if (!EnsureMemoryTransferReady(lock))
     {
+        if (transferSession_.PagedImages() && !transferSession_.HasPendingImage()) return TWRC_CANCEL;
         return Fail(TWCC_OPERATIONERROR);
     }
 
@@ -1437,7 +1454,7 @@ bool VirtualTwainDataSource::RefreshTransferReadyFromIpc(std::unique_lock<std::m
 
     ApplyScannerSettingsFromIpc(ipcState);
 
-    if (!ipcState.scanRequested || ipcState.selectedImages.empty())
+    if (!ipcState.scanRequested || ipcState.totalImages == 0)
     {
         diagnostics::AppendLine(L"DS", L"Transfer not ready yet: scanRequested=0 or no images selected");
         return false;
@@ -1476,10 +1493,10 @@ void VirtualTwainDataSource::CommitTransferReadyFromIpc(ScannerIpcState&& ipcSta
     const std::uint32_t transferBufferDelayMilliseconds = ipcState.transferBufferDelayMilliseconds;
     ipcSession_.ResetUiFlow();
     transferReadyNotified_ = false;
-    transferSession_.Begin(
-        revision,
-        std::move(ipcState.selectedImages),
-        transferBufferDelayMilliseconds);
+    if (ipcState.pagedImages)
+        transferSession_.BeginPaged(revision, ipcState.totalImages, transferBufferDelayMilliseconds);
+    else
+        transferSession_.Begin(revision, std::move(ipcState.selectedImages), transferBufferDelayMilliseconds);
     if (capabilities_.TransferCount() > 0)
     {
         const size_t requestedImageCount = static_cast<size_t>(capabilities_.TransferCount());
@@ -1775,7 +1792,7 @@ void VirtualTwainDataSource::TransferReadyWatcherLoop()
                 loggedGeneration = generation;
             }
 
-            if (ipcState.scanRequested && !ipcState.selectedImages.empty())
+            if (ipcState.scanRequested && ipcState.totalImages > 0)
             {
                 CommitTransferReadyFromIpc(std::move(ipcState));
                 transferReady_ = true;
@@ -1945,6 +1962,81 @@ bool VirtualTwainDataSource::LaunchScannerUiProcess() const
     return true;
 }
 
+bool VirtualTwainDataSource::ResolveTransferImage(
+    TW_UINT32& index, ScannerIpcImage& image, std::unique_lock<std::mutex>& lock)
+{
+    if (index >= transferSession_.ImageCount()) return false;
+    if (!transferSession_.PagedImages())
+    {
+        image = transferSession_.ImageAt(index);
+        return !image.path.empty();
+    }
+
+    const std::uint32_t revision = transferSession_.Revision();
+    ScannerIpcClient client;
+    if (transferSession_.ImageAt(index).path.empty())
+    {
+        ScannerIpcState page{};
+        const TW_UINT32 offset = (index / 32U) * 32U;
+        lock.unlock();
+        const bool fetched = client.TryGetImagePage(revision, offset, 32, page, 1000);
+        lock.lock();
+        if (!fetched || transferSession_.Revision() != revision || !IsAtLeast(TwainState::TransferReady) ||
+            page.totalImages < transferSession_.ImageCount() || index >= page.imageOffset + page.selectedImages.size()) return false;
+        transferSession_.CachePage(page.imageOffset, page.selectedImages);
+    }
+    image = transferSession_.ImageAt(index);
+    if (!transferSession_.PreparedPath(index).empty())
+    {
+        image.path = transferSession_.PreparedPath(index);
+        return true;
+    }
+
+    ReportTransferProgress(lock, index);
+    ULONGLONG deadline = GetTickCount64() + 10ULL * 60ULL * 1000ULL;
+    for (;;)
+    {
+        if (transferSession_.Revision() != revision || !IsAtLeast(TwainState::TransferReady) ||
+            index >= transferSession_.ImageCount() || IsUiStopRequested(lock)) return false;
+        std::wstring path;
+        lock.unlock();
+        bool skip = false;
+        const bool prepared = client.TryPrepareImage(revision, index, path, skip, 1000);
+        if (!prepared) Sleep(50);
+        lock.lock();
+        if (transferSession_.Revision() != revision || index >= transferSession_.ImageCount()) return false;
+        if (prepared && skip)
+        {
+            if (index != transferSession_.PendingImageIndex()) return false;
+            transferSession_.AdvancePendingImage();
+            index = transferSession_.PendingImageIndex();
+            ReportTransferProgress(lock, index);
+            if (!transferSession_.HasPendingImage()) { transferReady_ = false; return false; }
+            // Restart resolution for the following page using its original
+            // queue index, including metadata batch boundaries.
+            if (transferSession_.ImageAt(index).path.empty())
+            {
+                ScannerIpcState nextPage{};
+                const TW_UINT32 offset = (index / 32U) * 32U;
+                lock.unlock();
+                const bool fetched = client.TryGetImagePage(revision, offset, 32, nextPage, 1000);
+                lock.lock();
+                if (!fetched || transferSession_.Revision() != revision || index >= transferSession_.ImageCount()) return false;
+                transferSession_.CachePage(nextPage.imageOffset, nextPage.selectedImages);
+            }
+            image = transferSession_.ImageAt(index);
+            continue;
+        }
+        if (prepared)
+        {
+            transferSession_.CachePreparedPath(index, std::move(path));
+            image.path = transferSession_.PreparedPath(index);
+            return true;
+        }
+        if (GetTickCount64() >= deadline) return false;
+    }
+}
+
 bool VirtualTwainDataSource::TryResolveImageInfoIndex(TW_UINT32& imageIndex) const noexcept
 {
     if (state_ == TwainState::Transferring && transferSession_.HasCurrentImage())
@@ -1972,7 +2064,9 @@ bool VirtualTwainDataSource::FillImageInfo(
         return false;
     }
 
-    const ScannerIpcImage selectedImage = transferSession_.ImageAt(imageIndex);
+    const std::uint32_t imageRevision = transferSession_.Revision();
+    ScannerIpcImage selectedImage;
+    if (!ResolveTransferImage(imageIndex, selectedImage, lock)) return false;
     const TW_FIX32 xResolution = capabilities_.XResolution();
     const TW_FIX32 yResolution = capabilities_.YResolution();
     const TW_UINT16 pixelType = capabilities_.PixelType();
@@ -1986,7 +2080,8 @@ bool VirtualTwainDataSource::FillImageInfo(
     }
     lock.lock();
 
-    if (!transferSession_.MatchesImage(imageIndex, selectedImage) ||
+    if (transferSession_.Revision() != imageRevision ||
+        !transferSession_.MatchesImage(imageIndex, selectedImage) ||
         capabilities_.XResolution().Whole != xResolution.Whole ||
         capabilities_.XResolution().Frac != xResolution.Frac ||
         capabilities_.YResolution().Whole != yResolution.Whole ||
@@ -2089,8 +2184,10 @@ bool VirtualTwainDataSource::EnsureMemoryTransferReady(std::unique_lock<std::mut
 
     ResetMemoryTransfer();
     RasterImage raster{};
-    const TW_UINT32 imageIndex = transferSession_.PendingImageIndex();
-    const ScannerIpcImage selectedImage = transferSession_.PendingImage();
+    TW_UINT32 imageIndex = transferSession_.PendingImageIndex();
+    const std::uint32_t imageRevision = transferSession_.Revision();
+    ScannerIpcImage selectedImage;
+    if (!ResolveTransferImage(imageIndex, selectedImage, lock)) return false;
     const TW_UINT16 pixelType = capabilities_.PixelType();
 
     lock.unlock();
@@ -2107,6 +2204,7 @@ bool VirtualTwainDataSource::EnsureMemoryTransferReady(std::unique_lock<std::mut
 
     if ((state_ != TwainState::TransferReady && state_ != TwainState::Transferring) ||
         transferSession_.PendingImageIndex() != imageIndex ||
+        transferSession_.Revision() != imageRevision ||
         !transferSession_.MatchesImage(imageIndex, selectedImage) ||
         capabilities_.PixelType() != pixelType)
     {
@@ -2132,16 +2230,29 @@ bool VirtualTwainDataSource::IsUiStopRequested(std::unique_lock<std::mutex>& loc
     const std::uint32_t revision = transferSession_.Revision();
     ScannerIpcState ipcState{};
     ScannerIpcClient client;
+    const DWORD stateTimeout = transferSession_.PagedImages() ? 1000U : 30U;
     lock.unlock();
-    const bool gotState = client.TryGetState(ipcState, 30);
+    bool gotState = client.TryGetState(ipcState, stateTimeout);
     lock.lock();
 
-    if (!gotState ||
-        !transferSession_.HasRevision() ||
-        transferSession_.Revision() != revision)
+    // Pause at a page/strip boundary without discarding the transfer cursor.
+    // The UI process remains responsive and supplies Continue / Abort.
+    const ULONGLONG pauseDeadline = GetTickCount64() + 10ULL * 60ULL * 1000ULL;
+    const bool wasPaused = gotState && ipcState.transferPaused;
+    unsigned int pausedReadFailures = 0;
+    while (gotState && ipcState.revision == revision && ipcState.scanRequested && ipcState.transferPaused)
     {
-        return false;
+        lock.unlock();
+        Sleep(50);
+        gotState = client.TryGetState(ipcState, 150);
+        lock.lock();
+        if (transferSession_.Revision() != revision || GetTickCount64() >= pauseDeadline) return true;
+        if (!gotState && ++pausedReadFailures >= 3) return true;
+        if (!gotState) { gotState = true; ipcState.transferPaused = true; }
     }
+    if (!gotState) return wasPaused || transferSession_.PagedImages();
+    if (!transferSession_.HasRevision() || transferSession_.Revision() != revision) return true;
+    if (ipcState.revision != revision) return true;
 
     return !ipcState.scanRequested;
 }

@@ -15,7 +15,11 @@ public sealed record ScannerStateSnapshot(
     int YResolution,
     int TransferBufferDelayMilliseconds,
     bool ScanRequested,
-    IReadOnlyList<ScannerImageSelection> SelectedImages);
+    IReadOnlyList<ScannerImageSelection> SelectedImages,
+    int TotalImageCount = -1,
+    int ImageOffset = 0,
+    bool TransferPaused = false,
+    bool PagedImages = false);
 
 public sealed record ScannerSessionSettings(
     bool DuplexEnabled,

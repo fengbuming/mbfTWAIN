@@ -13,12 +13,13 @@ public sealed partial class MainForm
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 2,
+            RowCount = 3,
             Padding = new Padding(18, 16, 18, 16),
             BackColor = SurfaceBackground,
         };
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.Controls.Add(BuildQueueHeader(), 0, 0);
 
         thumbnailStrip.Dock = DockStyle.Fill;
@@ -29,6 +30,7 @@ public sealed partial class MainForm
         thumbnailStrip.Padding = new Padding(0, 0, 4, 4);
         thumbnailStrip.BackColor = SurfaceBackground;
         layout.Controls.Add(thumbnailStrip, 0, 1);
+        layout.Controls.Add(BuildQueuePagination(), 0, 2);
 
         queueCard.Controls.Add(layout);
         return queueCard;
@@ -40,7 +42,7 @@ public sealed partial class MainForm
         {
             Dock = DockStyle.Top,
             ColumnCount = 3,
-            RowCount = 3,
+            RowCount = 4,
             AutoSize = true,
             BackColor = SurfaceBackground,
             Margin = new Padding(0),
@@ -48,6 +50,7 @@ public sealed partial class MainForm
         header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        header.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         header.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         header.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         header.RowStyles.Add(new RowStyle(SizeType.AutoSize));
@@ -67,18 +70,16 @@ public sealed partial class MainForm
         ConfigureClearImagesLink();
         header.Controls.Add(clearImagesLink, 1, 0);
 
-        var triggerButton = new Button
-        {
-            Text = "开始扫描",
-            Width = 112,
-            Height = 46,
-            FlatStyle = FlatStyle.Flat,
-            BackColor = AccentColor,
-            ForeColor = Color.White,
-            Font = new Font(Font, FontStyle.Bold),
-            Margin = new Padding(12, 0, 0, 0),
-            Anchor = AnchorStyles.Top | AnchorStyles.Right,
-        };
+        Button triggerButton = triggerScanButton;
+        triggerButton.Text = "开始扫描";
+        triggerButton.Width = 112;
+        triggerButton.Height = 46;
+        triggerButton.FlatStyle = FlatStyle.Flat;
+        triggerButton.BackColor = AccentColor;
+        triggerButton.ForeColor = Color.White;
+        triggerButton.Font = new Font(Font, FontStyle.Bold);
+        triggerButton.Margin = new Padding(12, 0, 0, 0);
+        triggerButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
         triggerButton.FlatAppearance.BorderSize = 0;
         triggerButton.Click += (_, _) => TriggerScan();
         header.Controls.Add(triggerButton, 2, 0);
@@ -97,6 +98,10 @@ public sealed partial class MainForm
         ConfigureRememberImagesCheckBox();
         header.Controls.Add(rememberImagesCheckBox, 0, 2);
         header.SetColumnSpan(rememberImagesCheckBox, 2);
+
+        Control loadingStatus = BuildImageLoadingStatus();
+        header.Controls.Add(loadingStatus, 0, 3);
+        header.SetColumnSpan(loadingStatus, 3);
 
         return header;
     }

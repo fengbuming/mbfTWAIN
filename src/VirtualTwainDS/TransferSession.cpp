@@ -11,6 +11,8 @@ void TransferSession::Begin(
     std::vector<ScannerIpcImage>&& images,
     std::uint32_t transferBufferDelayMilliseconds)
 {
+    pagedImages_ = false;
+    preparedPath_.clear();
     revision_ = revision;
     transferBufferDelayMilliseconds_ = transferBufferDelayMilliseconds;
     pendingImageIndex_ = 0;
@@ -23,6 +25,8 @@ void TransferSession::Begin(
 
 void TransferSession::Clear() noexcept
 {
+    pagedImages_ = false;
+    preparedPath_.clear();
     images_.clear();
     revision_ = 0;
     transferBufferDelayMilliseconds_ = 100;
@@ -35,6 +39,7 @@ void TransferSession::Clear() noexcept
 
 void TransferSession::DiscardImages() noexcept
 {
+    preparedPath_.clear();
     images_.clear();
     transferBufferDelayMilliseconds_ = 100;
     pendingImageIndex_ = 0;
@@ -42,6 +47,36 @@ void TransferSession::DiscardImages() noexcept
     currentImageIndex_ = 0;
     scanUiHidden_ = false;
     ResetMemory();
+}
+
+void TransferSession::BeginPaged(std::uint32_t revision, std::uint32_t totalImages, std::uint32_t delay)
+{
+    Begin(revision, std::vector<ScannerIpcImage>(totalImages), delay);
+    pagedImages_ = true;
+}
+
+void TransferSession::CachePage(std::uint32_t offset, const std::vector<ScannerIpcImage>& images)
+{
+    // Release previous batches of paths; retain the current image for the
+    // host's post-transfer IMAGEINFO query.
+    for (size_t index = 0; index < images_.size(); ++index)
+    {
+        if (index + 1U < offset) images_[index] = ScannerIpcImage{};
+    }
+    for (size_t index = 0; index < images.size() && offset + index < images_.size(); ++index)
+        images_[offset + index] = images[index];
+}
+
+void TransferSession::CachePreparedPath(TW_UINT32 index, std::wstring path)
+{
+    preparedIndex_ = index;
+    preparedPath_ = std::move(path);
+}
+
+const std::wstring& TransferSession::PreparedPath(TW_UINT32 index) const noexcept
+{
+    static const std::wstring empty;
+    return preparedIndex_ == index ? preparedPath_ : empty;
 }
 
 std::uint32_t TransferSession::TakeRevision() noexcept
@@ -101,7 +136,8 @@ const ScannerIpcImage& TransferSession::PendingImage() const noexcept
 bool TransferSession::MatchesImage(TW_UINT32 imageIndex, const ScannerIpcImage& image) const noexcept
 {
     return imageIndex < images_.size() &&
-        images_[imageIndex].path == image.path &&
+        (images_[imageIndex].path == image.path ||
+            (!PreparedPath(imageIndex).empty() && PreparedPath(imageIndex) == image.path)) &&
         images_[imageIndex].rotationDegrees == image.rotationDegrees;
 }
 

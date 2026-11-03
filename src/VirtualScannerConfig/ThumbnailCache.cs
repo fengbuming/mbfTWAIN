@@ -9,12 +9,13 @@ internal sealed class ThumbnailCache(int limit) : IDisposable
     private readonly object sync = new();
     private readonly Dictionary<ThumbnailCacheKey, Bitmap> cache = [];
     private readonly Queue<ThumbnailCacheKey> cacheOrder = [];
+    private bool disposed;
 
     public Image? TryClone(ThumbnailCacheKey cacheKey)
     {
         lock (sync)
         {
-            return cache.TryGetValue(cacheKey, out Bitmap? cached)
+            return !disposed && cache.TryGetValue(cacheKey, out Bitmap? cached)
                 ? new Bitmap(cached)
                 : null;
         }
@@ -24,7 +25,7 @@ internal sealed class ThumbnailCache(int limit) : IDisposable
     {
         lock (sync)
         {
-            if (cache.ContainsKey(cacheKey))
+            if (disposed || cache.ContainsKey(cacheKey))
             {
                 thumbnail.Dispose();
                 return;
@@ -47,6 +48,7 @@ internal sealed class ThumbnailCache(int limit) : IDisposable
     {
         lock (sync)
         {
+            disposed = true;
             foreach (Bitmap thumbnail in cache.Values)
             {
                 thumbnail.Dispose();
