@@ -52,7 +52,14 @@ public sealed partial class MainForm
             if (skippedTransferIndices.Contains(index)) return "OK SKIP\n";
             source = selectedImages[index].Path;
         }
-        return transferImageStager.Request(requestedRevision, index, source);
+        string response = transferImageStager.Request(requestedRevision, index, source);
+        bool reading = response == "OK WAIT\n";
+        PostPipeCallback(() =>
+        {
+            if (scanRequested && activeScanRevision == requestedRevision)
+                transferProgressDialog?.SetReadingImage(reading);
+        });
+        return response;
     }
 
     private void PauseTransfer(string? message = null)
@@ -136,7 +143,7 @@ public sealed partial class MainForm
             Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Both,
             WordWrap = false, Text = string.Join(Environment.NewLine, skippedPaths),
         };
-        var close = new Button { Dock = DockStyle.Bottom, Height = 36, Text = "知道了" };
+        var close = new ActionButton { Dock = DockStyle.Bottom, Height = 36, Text = "知道了" };
         close.Click += (_, _) => dialog.Close();
         dialog.Controls.Add(paths);
         dialog.Controls.Add(description);

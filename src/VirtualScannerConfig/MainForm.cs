@@ -60,10 +60,10 @@ public sealed partial class MainForm : Form
     private CancellationTokenSource? pendingExitCancellation;
 
     private readonly FlowLayoutPanel thumbnailStrip = new();
-    private readonly LinkLabel clearImagesLink = new();
-    private readonly CheckBox rememberImagesCheckBox = new();
+    private readonly LinkLabel clearImagesLink = new StateLinkLabel();
+    private readonly CheckBox rememberImagesCheckBox = new StateCheckBox();
     private readonly Label settingsSummaryLabel = new();
-    private readonly Button settingsButton = new();
+    private readonly Button settingsButton = new ActionButton();
     private readonly Label statusLabel = new();
     private readonly ToolTip toolTip = new();
     private Button? addTileButton;
@@ -119,6 +119,7 @@ public sealed partial class MainForm : Form
     {
         if (disposing)
         {
+            disposingImageUi = true;
             StopImageLoading(showMessage: false);
             imageLoadingLifetime.Cancel();
             transferImageStager.Dispose();
@@ -541,8 +542,8 @@ public sealed partial class MainForm : Form
             AutoSize = true,
             Margin = new Padding(0, 12, 0, 0),
         };
-        var okButton = new Button { Text = "确定", DialogResult = DialogResult.OK, Width = 76 };
-        var cancelButton = new Button { Text = "取消", DialogResult = DialogResult.Cancel, Width = 76 };
+        var okButton = new ActionButton { Text = "确定", DialogResult = DialogResult.OK, Width = 76 };
+        var cancelButton = new ActionButton { Text = "取消", DialogResult = DialogResult.Cancel, Width = 76 };
         buttons.Controls.Add(okButton);
         buttons.Controls.Add(cancelButton);
         layout.Controls.Add(buttons, 0, 6);
@@ -571,13 +572,14 @@ public sealed partial class MainForm : Form
         {
             Dock = DockStyle.Top,
             ColumnCount = 2,
-            RowCount = 2,
+            RowCount = 3,
             AutoSize = true,
             Margin = new Padding(0, 12, 0, 0),
             BackColor = SurfaceBackground,
         };
         panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         panel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        panel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         panel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         panel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
@@ -591,7 +593,7 @@ public sealed partial class MainForm : Form
         };
         panel.Controls.Add(versionLabel, 0, 0);
 
-        var updateButton = new Button
+        var updateButton = new ActionButton
         {
             Text = "检查更新",
             Width = 92,
@@ -613,9 +615,38 @@ public sealed partial class MainForm : Form
         panel.Controls.Add(updateStatus, 0, 1);
         panel.SetColumnSpan(updateStatus, 2);
 
+        var updateActivity = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Top, Visible = false, Margin = new Padding(0, 4, 0, 0) };
+        var updateBusy = new BusyIndicator();
+        var cancelUpdate = new StateLinkLabel { AutoSize = true, Text = "取消", Margin = new Padding(8, 4, 0, 0) };
+        updateActivity.Controls.AddRange([updateBusy, cancelUpdate]);
+        panel.Controls.Add(updateActivity, 0, 2);
+        panel.SetColumnSpan(updateActivity, 2);
+        CancellationTokenSource? operation = null;
+        cancelUpdate.LinkClicked += (_, _) =>
+        {
+            cancelUpdate.Enabled = false;
+            operation?.Cancel();
+        };
+        if (owner is Form ownerForm) ownerForm.FormClosing += (_, _) => operation?.Cancel();
+
         updateButton.Click += async (_, _) =>
         {
-            await RunUpdateFromSettingsAsync(owner, updateStatus, updateButton);
+            if (operation is not null) return;
+            using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(updateCancellation.Token);
+            operation = cancellation;
+            updateActivity.Visible = true;
+            updateBusy.Active = true;
+            cancelUpdate.Enabled = true;
+            try { await RunUpdateFromSettingsAsync(owner, updateStatus, updateButton, cancellation.Token); }
+            finally
+            {
+                operation = null;
+                if (!updateActivity.IsDisposed)
+                {
+                    updateBusy.Active = false;
+                    updateActivity.Visible = false;
+                }
+            }
         };
 
         return panel;
@@ -631,16 +662,17 @@ public sealed partial class MainForm : Form
         };
     }
 
-    private async Task RunUpdateFromSettingsAsync(IWin32Window owner, Label updateStatus, Button updateButton)
+    private async Task RunUpdateFromSettingsAsync(IWin32Window owner, Label updateStatus, Button updateButton, CancellationToken cancellationToken)
     {
         updateButton.Enabled = false;
+        updateButton.Text = "正在检查…";
         try
         {
             updateStatus.Text = "正在检查 GitHub Releases...";
-            CancellationToken cancellationToken = updateCancellation.Token;
             ReleaseUpdateInfo release = await Task
                 .Run(() => updateService.GetLatestReleaseAsync(cancellationToken), cancellationToken)
                 .ConfigureAwait(true);
+            cancellationToken.ThrowIfCancellationRequested();
             latestRelease = release;
             UpdateStatus();
 
@@ -673,37 +705,43 @@ public sealed partial class MainForm : Form
 
             var progress = new Progress<DownloadProgress>(progressValue =>
             {
-                if (!updateStatus.IsDisposed)
+                if (!updateStatus.IsDisposed && !cancellationToken.IsCancellationRequested)
                 {
                     updateStatus.Text = $"正在下载 {progressValue.ToDisplayText()}";
                 }
             });
+            updateButton.Text = "正在下载…";
             string installerPath = await Task
                 .Run(() => updateService.DownloadInstallerAsync(release, progress, cancellationToken), cancellationToken)
                 .ConfigureAwait(true);
+            cancellationToken.ThrowIfCancellationRequested();
             updateStatus.Text = "下载完成，正在启动安装程序...";
             LaunchInstallerElevated(installerPath);
             updateStatus.Text = "安装程序已启动，请按提示完成安装。";
         }
         catch (OperationCanceledException)
         {
-            updateStatus.Text = "更新检查已取消。";
+            if (!updateStatus.IsDisposed) updateStatus.Text = "更新已取消。";
         }
         catch (Win32Exception exception) when (exception.NativeErrorCode == 1223)
         {
-            updateStatus.Text = "已取消管理员授权。";
+            if (!updateStatus.IsDisposed) updateStatus.Text = "已取消管理员授权。";
         }
         catch (Exception exception)
         {
             DiagnosticsLog.WriteException("UI", exception, "Update from settings");
-            updateStatus.Text = "更新失败，请稍后重试。";
-            MessageBox.Show(owner, exception.Message, "更新失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            if (!updateStatus.IsDisposed)
+            {
+                updateStatus.Text = "更新失败，请稍后重试。";
+                MessageBox.Show(owner, exception.Message, "更新失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
         }
         finally
         {
             if (!updateButton.IsDisposed)
             {
                 updateButton.Enabled = true;
+                updateButton.Text = "检查更新";
             }
         }
     }
@@ -1336,6 +1374,7 @@ public sealed partial class MainForm : Form
         }
 
         CancellationToken cancellationToken = RestartThumbnailLoads();
+        failedThumbnailCount = 0;
         Button addButton = GetAddTileButton();
 
         thumbnailStrip.SuspendLayout();
@@ -1416,7 +1455,7 @@ public sealed partial class MainForm : Form
 
     private Button BuildAddTileButton()
     {
-        var button = new Button
+        var button = new ActionButton
         {
             Width = 176,
             Height = 170,
@@ -1551,6 +1590,8 @@ public sealed partial class MainForm : Form
         Size size,
         CancellationToken cancellationToken)
     {
+        state.LoadingIndicator.Active = false;
+        state.LoadingIndicator.Visible = false;
         // No file metadata or file-system probes on the UI thread. The key is
         // only populated after the background reader has successfully read it.
         if (state.LoadedImage == image && state.HasLoadedThumbnail)
@@ -1581,6 +1622,8 @@ public sealed partial class MainForm : Form
         }
 
         ReplacePictureBoxImage(state.PictureBox, CreateFallbackThumbnail(size, "加载中\n可取消"));
+        state.LoadingIndicator.Visible = true;
+        state.LoadingIndicator.Active = true;
         _ = LoadThumbnailAsync(state, image, size, requestId, cancellationToken);
     }
 
@@ -1638,7 +1681,7 @@ public sealed partial class MainForm : Form
 
     private Button BuildMoveButton(string text, int index, int direction, bool enabled)
     {
-        var button = new Button
+        var button = new ActionButton
         {
             Width = 28,
             Height = 42,
@@ -1661,11 +1704,11 @@ public sealed partial class MainForm : Form
 
     private Button BuildTileActionButton(string text, string tooltip, int index, Action action, bool isDanger = false)
     {
-        var button = new Button
+        var button = new ActionButton
         {
             Width = 34,
             Height = 30,
-            Text = isDanger ? string.Empty : text,
+            Text = text,
             TextAlign = ContentAlignment.MiddleCenter,
             FlatStyle = FlatStyle.Flat,
             BackColor = isDanger ? Color.FromArgb(255, 246, 242) : Color.FromArgb(238, 245, 240),
@@ -1679,16 +1722,6 @@ public sealed partial class MainForm : Form
         };
         button.FlatAppearance.BorderColor = isDanger ? Color.FromArgb(231, 199, 186) : BorderColor;
         button.FlatAppearance.BorderSize = 1;
-        if (isDanger)
-        {
-            button.Paint += (_, args) => TextRenderer.DrawText(
-                args.Graphics,
-                text,
-                button.Font,
-                button.ClientRectangle,
-                button.ForeColor,
-                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
-        }
 
         button.Click += (_, _) => action();
         toolTip.SetToolTip(button, tooltip);
@@ -1869,24 +1902,27 @@ public sealed partial class MainForm : Form
             BackColor = Color.Black,
             SizeMode = PictureBoxSizeMode.Zoom,
         };
+        using var loading = new WaitOverlay { BackColor = Color.FromArgb(24, 30, 26) };
+        var footer = new Panel { Dock = DockStyle.Bottom, Height = 48, BackColor = Color.FromArgb(24, 30, 26) };
         var message = new Label
         {
-            Dock = DockStyle.Top,
-            Height = 42,
-            TextAlign = ContentAlignment.MiddleCenter,
-            ForeColor = Color.White,
-            Text = "正在加载预览（最多 10 秒），按 Esc 或关闭窗口可取消…",
+            Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft,
+            Padding = new Padding(12, 0, 12, 0), ForeColor = Color.White,
+            Text = "按 Esc 或双击图片关闭预览",
         };
-        var retry = new Button
+        var retry = new ActionButton
         {
-            Dock = DockStyle.Bottom,
-            Height = 36,
-            Text = "重新加载",
-            Visible = false,
+            Dock = DockStyle.Right, Width = 120, Text = "重新加载", Visible = false,
         };
+        var close = new ActionButton { Dock = DockStyle.Right, Width = 100, Text = "关闭预览" };
+        close.Click += (_, _) => dialog.Close();
+        footer.Controls.Add(message);
+        footer.Controls.Add(retry);
+        footer.Controls.Add(close);
         dialog.Controls.Add(viewer);
-        dialog.Controls.Add(message);
-        dialog.Controls.Add(retry);
+        dialog.Controls.Add(footer);
+        dialog.Controls.Add(loading);
+        loading.CancelRequested += (_, _) => dialog.Close();
         dialog.FormClosing += (_, _) => cancellation.Cancel();
         dialog.KeyDown += (_, args) =>
         {
@@ -1899,9 +1935,11 @@ public sealed partial class MainForm : Form
 
         async Task LoadPreviewAsync()
         {
+            retry.Enabled = false;
             retry.Visible = false;
-            message.Visible = true;
-            message.Text = "正在加载预览（最多 10 秒），按 Esc 或关闭窗口可取消…";
+            viewer.Enabled = false;
+            viewer.Visible = false;
+            loading.ShowLoading(null, "正在加载预览", "最多等待 10 秒 · 可取消或按 Esc 关闭", allowAbort: false);
             try
             {
                 Bitmap preview = await ImageFileOperations.RunAsync(
@@ -1913,7 +1951,7 @@ public sealed partial class MainForm : Form
                 }
 
                 ReplacePictureBoxImage(viewer, preview);
-                message.Visible = false;
+                message.Text = "按 Esc 或双击图片关闭预览";
             }
             catch (OperationCanceledException)
             {
@@ -1927,6 +1965,16 @@ public sealed partial class MainForm : Form
                         : "暂时无法读取图片，请检查文件或网络后重试。";
                     retry.Visible = true;
                     DiagnosticsLog.WriteException("UI", exception, $"Load preview path={image.Path}");
+                }
+            }
+            finally
+            {
+                if (!dialog.IsDisposed)
+                {
+                    loading.Dismiss();
+                    viewer.Enabled = true;
+                    viewer.Visible = true;
+                    retry.Enabled = true;
                 }
             }
         }
@@ -2174,9 +2222,19 @@ public sealed partial class MainForm : Form
         return new Rectangle(left, top, width, height);
     }
 
-    private sealed class ThumbnailTileState(PictureBox pictureBox)
+    private sealed class ThumbnailTileState
     {
-        public PictureBox PictureBox { get; } = pictureBox;
+        public ThumbnailTileState(PictureBox pictureBox)
+        {
+            PictureBox = pictureBox;
+            LoadingIndicator = new BusyIndicator { Visible = false };
+            pictureBox.Controls.Add(LoadingIndicator);
+            pictureBox.SizeChanged += (_, _) => LoadingIndicator.Location =
+                new Point((pictureBox.Width - LoadingIndicator.Width) / 2, Math.Max(8, pictureBox.Height / 2 - 50));
+        }
+
+        public PictureBox PictureBox { get; }
+        public BusyIndicator LoadingIndicator { get; }
 
         public ScannerImageSelection? Image { get; set; }
 

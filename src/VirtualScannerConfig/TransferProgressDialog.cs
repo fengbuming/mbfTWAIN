@@ -9,13 +9,16 @@ internal sealed class TransferProgressDialog : Form
     private readonly Label titleLabel = new();
     private readonly Label detailLabel = new();
     private readonly ProgressBar progressBar = new();
-    private readonly Button cancelButton = new();
-    private readonly Button continueButton = new();
-    private readonly Button abortButton = new();
-    private readonly Button skipButton = new();
-    private readonly Button replaceButton = new();
+    private readonly Button cancelButton = new ActionButton();
+    private readonly Button continueButton = new ActionButton();
+    private readonly Button abortButton = new ActionButton();
+    private readonly Button skipButton = new ActionButton();
+    private readonly Button replaceButton = new ActionButton();
+    private readonly BusyIndicator busyIndicator = new() { Margin = new Padding(0, 0, 10, 0) };
     private bool paused;
     private string? issueMessage;
+    private bool complete;
+    private bool readingImage;
 
     public event EventHandler? CancelRequested;
     public event EventHandler? ContinueRequested;
@@ -32,7 +35,7 @@ internal sealed class TransferProgressDialog : Form
         MaximizeBox = false;
         ControlBox = false;
         ShowInTaskbar = false;
-        ClientSize = new Size(620, 232);
+        ClientSize = new Size(620, 260);
         BackColor = Color.FromArgb(255, 255, 252);
 
         var layout = new TableLayoutPanel
@@ -52,7 +55,10 @@ internal sealed class TransferProgressDialog : Form
         titleLabel.Font = new Font(Font, FontStyle.Bold);
         titleLabel.ForeColor = Color.FromArgb(33, 43, 37);
         titleLabel.Margin = new Padding(0, 0, 0, 8);
-        layout.Controls.Add(titleLabel, 0, 0);
+        var heading = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Top, Margin = new Padding(0) };
+        heading.Controls.Add(busyIndicator);
+        heading.Controls.Add(titleLabel);
+        layout.Controls.Add(heading, 0, 0);
 
         progressBar.Dock = DockStyle.Top;
         progressBar.Minimum = 0;
@@ -85,9 +91,14 @@ internal sealed class TransferProgressDialog : Form
         continueButton.Enabled = false;
         continueButton.Click += (_, _) => ContinueRequested?.Invoke(this, EventArgs.Empty);
         buttonPanel.Controls.Add(continueButton);
+        continueButton.BackColor = Color.FromArgb(29, 111, 84);
+        continueButton.ForeColor = Color.White;
+        continueButton.FlatAppearance.BorderSize = 0;
         abortButton.Text = "中止本次扫描";
         abortButton.Width = 118;
         abortButton.Height = 30;
+        abortButton.BackColor = Color.FromArgb(255, 246, 242);
+        abortButton.ForeColor = Color.FromArgb(151, 68, 49);
         abortButton.Click += (_, _) => AbortRequested?.Invoke(this, EventArgs.Empty);
         buttonPanel.Controls.Add(abortButton);
         skipButton.Text = "跳过此图继续";
@@ -110,7 +121,7 @@ internal sealed class TransferProgressDialog : Form
     {
         int normalizedTotal = Math.Max(1, totalImages);
         int normalizedCompleted = Math.Clamp(completedImages, 0, normalizedTotal);
-        bool complete = normalizedCompleted >= normalizedTotal;
+        complete = normalizedCompleted >= normalizedTotal;
 
         titleLabel.Text = waitingForTwain
             ? "等待 TWAIN 程序取图..."
@@ -121,18 +132,32 @@ internal sealed class TransferProgressDialog : Form
         progressBar.Value = complete
             ? progressBar.Maximum
             : (int)Math.Round(normalizedCompleted * (progressBar.Maximum / (double)normalizedTotal));
-        cancelButton.Enabled = !complete;
+        progressBar.Style = waitingForTwain && !paused ? ProgressBarStyle.Marquee : ProgressBarStyle.Continuous;
+        progressBar.MarqueeAnimationSpeed = waitingForTwain && !paused ? 30 : 0;
+        cancelButton.Enabled = !paused && !complete;
+        busyIndicator.Active = !paused && !complete;
     }
 
     public void SetPaused(bool value, string? message = null, bool imageFailed = false)
     {
         bool changed = paused != value;
         paused = value;
-        cancelButton.Enabled = !value;
-        continueButton.Enabled = value;
+        if (value) readingImage = false;
+        cancelButton.Enabled = !value && !complete;
+        continueButton.Enabled = value && !complete;
+        abortButton.Enabled = !complete;
         continueButton.Text = imageFailed ? "重试此图" : "继续";
         skipButton.Visible = value && imageFailed;
         replaceButton.Visible = value && imageFailed;
+        busyIndicator.Active = !value && !complete;
+        busyIndicator.Visible = busyIndicator.Active;
+        if (value)
+        {
+            progressBar.MarqueeAnimationSpeed = 0;
+            progressBar.Style = ProgressBarStyle.Continuous;
+        }
+        titleLabel.ForeColor = imageFailed ? Color.FromArgb(151, 86, 25) : Color.FromArgb(33, 43, 37);
+        detailLabel.BackColor = imageFailed ? Color.FromArgb(255, 246, 225) : BackColor;
         if (value)
         {
             titleLabel.Text = "送图已暂停";
@@ -144,6 +169,18 @@ internal sealed class TransferProgressDialog : Form
         {
             issueMessage = null;
             if (changed) titleLabel.Text = "正在继续送图…";
+        }
+    }
+
+    public void SetReadingImage(bool reading)
+    {
+        if (readingImage == reading) return;
+        readingImage = reading;
+        if (reading && !paused && !complete)
+        {
+            titleLabel.Text = "正在读取当前图片…";
+            detailLabel.Text = "网络图片最多等待 10 秒，可取消后继续或中止本次扫描。";
+            busyIndicator.Active = true;
         }
     }
 }

@@ -26,10 +26,11 @@ public sealed partial class MainForm
         thumbnailStrip.AutoScroll = true;
         thumbnailStrip.WrapContents = true;
         thumbnailStrip.FlowDirection = FlowDirection.LeftToRight;
-        thumbnailStrip.Margin = new Padding(0, 18, 0, 0);
+        thumbnailStrip.Margin = new Padding(0);
         thumbnailStrip.Padding = new Padding(0, 0, 4, 4);
         thumbnailStrip.BackColor = SurfaceBackground;
-        layout.Controls.Add(thumbnailStrip, 0, 1);
+        InitializeQueueBusyState();
+        layout.Controls.Add(queueViewport, 0, 1);
         layout.Controls.Add(BuildQueuePagination(), 0, 2);
 
         queueCard.Controls.Add(layout);
@@ -113,6 +114,7 @@ public sealed partial class MainForm
         clearImagesLink.LinkColor = Color.FromArgb(38, 100, 171);
         clearImagesLink.ActiveLinkColor = Color.FromArgb(24, 75, 132);
         clearImagesLink.VisitedLinkColor = clearImagesLink.LinkColor;
+        clearImagesLink.DisabledLinkColor = Color.FromArgb(117, 127, 119);
         clearImagesLink.Margin = new Padding(0, 2, 0, 0);
         clearImagesLink.LinkBehavior = LinkBehavior.AlwaysUnderline;
         clearImagesLink.LinkClicked += (_, _) => ClearImages();
@@ -139,5 +141,6 @@ public sealed partial class MainForm
         NormalizeSelection();
         RefreshThumbnailStrip();
         UpdateStatus();
+        UpdateQueueBusyState();
     }
 }

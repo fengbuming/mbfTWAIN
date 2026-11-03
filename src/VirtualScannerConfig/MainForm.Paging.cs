@@ -9,8 +9,8 @@ public sealed partial class MainForm
 {
     private const int QueuePageSize = 12;
     private int queuePageIndex;
-    private readonly Button previousQueuePageButton = new();
-    private readonly Button nextQueuePageButton = new();
+    private readonly Button previousQueuePageButton = new ActionButton();
+    private readonly Button nextQueuePageButton = new ActionButton();
     private readonly NumericUpDown queuePageInput = new();
     private readonly Label queuePageLabel = new();
     private bool updatingQueuePage;

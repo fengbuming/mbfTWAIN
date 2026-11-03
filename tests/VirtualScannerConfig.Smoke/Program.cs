@@ -12,7 +12,7 @@ internal static class Program
         .GetMethod("RunAsync", BindingFlags.Static | BindingFlags.NonPublic)!.MakeGenericMethod(typeof(Probe));
 
     [STAThread]
-    private static int Main()
+    private static int Main(string[] arguments)
     {
         Application.SetHighDpiMode(HighDpiMode.SystemAware);
         Application.EnableVisualStyles();
@@ -26,6 +26,9 @@ internal static class Program
             try
             {
                 VerifyBackgroundReads();
+                VerifyInteractionStates(directory);
+                if (!arguments.Contains("--interaction-only"))
+                {
                 VerifyRestoration(directory);
                 VerifyStalledTransferDeadline(directory);
                 VerifyNativePagedTransfer(directory, "x64");
@@ -36,6 +39,7 @@ internal static class Program
                 VerifyNativeIssueRecovery(directory, "Win32", false);
                 VerifyNativeIssueRecovery(directory, "x64", true);
                 VerifyNativeIssueRecovery(directory, "Win32", true);
+                }
                 Console.WriteLine("ALL IMAGE LOADING SMOKES PASSED");
             }
             catch (Exception exception)
@@ -101,6 +105,93 @@ internal static class Program
         return form;
     }
 
+    private static void VerifyInteractionStates(string directory)
+    {
+        string previewDirectory = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../build/ui-previews"));
+        Directory.CreateDirectory(previewDirectory);
+        string path = Path.Combine(directory, "interaction.bmp");
+        using (var image = new Bitmap(40, 70)) image.Save(path);
+        using var form = CreateForm(directory);
+        form.Show();
+        var images = Enumerable.Range(0, 500).Select(_ => new ScannerImageSelection(path, 0)).ToArray();
+        Invoke(form, "StartImageImport", images, false);
+        Control overlay = Get<Control>(form, "queueWaitOverlay");
+        Check(overlay.Visible && !Get<FlowLayoutPanel>(form, "thumbnailStrip").Enabled &&
+            !Get<CheckBox>(form, "rememberImagesCheckBox").Enabled && !Get<Button>(form, "settingsButton").Enabled,
+            "import mask protects the queue and conflicting settings without blocking cancellation");
+        Check(overlay.Width > 400 && overlay.Height > 200 && overlay.Parent!.Controls.GetChildIndex(overlay) == 0,
+            "loading mask covers the viewport above the queue");
+        Button trigger = Get<Button>(form, "triggerScanButton");
+        Check(!trigger.Enabled && trigger.Text.Contains("加载") && trigger.Cursor == Cursors.Default,
+            "disabled primary action has loading copy and an inactive cursor");
+        SavePreview(form, Path.Combine(previewDirectory, "01-import-loading.png"));
+        SavePreview(overlay, Path.Combine(previewDirectory, "01b-import-overlay.png"));
+        Get<Button>(overlay, "cancel").PerformClick();
+        Check(!overlay.Visible && Get<FlowLayoutPanel>(form, "thumbnailStrip").Enabled && trigger.Enabled,
+            "mask cancel immediately restores the working surface");
+        Invoke(form, "RetryImageLoading");
+        PumpUntil(() => Get<object?>(form, "rememberedImageRestoreCancellation") is null && Get<int>(form, "pendingThumbnailLoads") == 0, 4000);
+        Check(!overlay.Visible && trigger.Text == "开始扫描" && Get<CheckBox>(form, "rememberImagesCheckBox").Enabled,
+            "successful resume clears the mask, spinner and disabled states");
+        Check(!Get<LinkLabel>(form, "retryImageLoadingLink").Visible,
+            "successful loading does not leave an unnecessary retry action");
+        Check(!Get<Button>(form, "previousQueuePageButton").Enabled && Get<Button>(form, "nextQueuePageButton").Enabled,
+            "pagination makes unavailable and available navigation distinct");
+        SavePreview(form, Path.Combine(previewDirectory, "02-queue-ready.png"));
+        using (var enabled = new Bitmap(trigger.Width, trigger.Height))
+        using (var disabled = new Bitmap(trigger.Width, trigger.Height))
+        {
+            trigger.DrawToBitmap(enabled, trigger.ClientRectangle);
+            trigger.Enabled = false;
+            trigger.DrawToBitmap(disabled, trigger.ClientRectangle);
+            Check(enabled.GetPixel(6, 6) != disabled.GetPixel(6, 6), "primary button visibly changes its fill when disabled");
+            trigger.Enabled = true;
+        }
+
+        Type dialogType = typeof(MainForm).Assembly.GetType("MbfTwain.VirtualScannerConfig.TransferProgressDialog")!;
+        using var transfer = (Form)Activator.CreateInstance(dialogType)!;
+        transfer.Show();
+        MethodInfo update = dialogType.GetMethod("UpdateProgress")!;
+        MethodInfo pause = dialogType.GetMethod("SetPaused")!;
+        update.Invoke(transfer, [7u, 0, 500, true]);
+        pause.Invoke(transfer, [false, null, false]);
+        Check(Get<ProgressBar>(transfer, "progressBar").Style == ProgressBarStyle.Marquee &&
+            Get<Button>(transfer, "cancelButton").Enabled && !Get<Button>(transfer, "continueButton").Enabled,
+            "TWAIN waiting state animates while only valid actions are enabled");
+        SavePreview(transfer, Path.Combine(previewDirectory, "03-transfer-waiting.png"));
+        update.Invoke(transfer, [7u, 28, 500, false]);
+        pause.Invoke(transfer, [true, "第 29 张读取超时：\\\\fileserver\\扫描图片\\第29张.jpg\n可重试此图、跳过、更换图片或中止扫描。", true]);
+        Check(Get<ProgressBar>(transfer, "progressBar").Style == ProgressBarStyle.Continuous &&
+            !Get<Button>(transfer, "cancelButton").Enabled && Get<Button>(transfer, "continueButton").Enabled &&
+            Get<Button>(transfer, "skipButton").Visible && Get<Button>(transfer, "replaceButton").Visible,
+            "image failure stops loading animation and enables explicit recovery actions");
+        SavePreview(transfer, Path.Combine(previewDirectory, "04-transfer-needs-action.png"));
+        pause.Invoke(transfer, [false, null, false]);
+        Check(!Get<Button>(transfer, "skipButton").Visible && !Get<Button>(transfer, "continueButton").Enabled,
+            "resume clears stale failure actions");
+        update.Invoke(transfer, [7u, 500, 500, false]);
+        pause.Invoke(transfer, [false, null, false]);
+        Check(!Get<Button>(transfer, "cancelButton").Enabled && !Get<Button>(transfer, "abortButton").Enabled,
+            "completion disables repeated cancel and abort actions");
+
+        using var canceledUpdate = new CancellationTokenSource();
+        canceledUpdate.Cancel();
+        using var updateStatus = new Label();
+        using var updateButton = new Button { Text = "检查更新" };
+        Task updateTask = (Task)Invoke(form, "RunUpdateFromSettingsAsync", form, updateStatus, updateButton, canceledUpdate.Token)!;
+        PumpUntil(() => updateTask.IsCompleted, 1500);
+        updateTask.GetAwaiter().GetResult();
+        Check(updateButton.Enabled && updateButton.Text == "检查更新" && updateStatus.Text.Contains("取消"),
+            "canceled update restores its button without network access");
+    }
+
+    private static void SavePreview(Control control, string path)
+    {
+        using var bitmap = new Bitmap(control.Width, control.Height);
+        control.DrawToBitmap(bitmap, new Rectangle(Point.Empty, control.Size));
+        bitmap.Save(path, System.Drawing.Imaging.ImageFormat.Png);
+    }
+
     private static void VerifyRestoration(string directory)
     {
         string imagePath = Path.Combine(directory, "page.bmp");
@@ -161,7 +252,17 @@ internal static class Program
             closePreview.Tick += (_, _) =>
             {
                 Form? preview = Application.OpenForms.Cast<Form>().FirstOrDefault(window => window.Text == Path.GetFileName(imagePath));
-                if (preview is not null) { preview.Close(); previewClosed = true; closePreview.Stop(); }
+                if (preview is not null)
+                {
+                    Control previewMask = preview.Controls.Cast<Control>().Single(control => control.GetType().Name == "WaitOverlay");
+                    Check(previewMask.Visible && Get<Button>(previewMask, "cancel").Enabled,
+                        "preview has a visible loading mask with an enabled cancel action");
+                    string previewPath = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../build/ui-previews/05-preview-loading.png"));
+                    SavePreview(preview, previewPath);
+                    Get<Button>(previewMask, "cancel").PerformClick();
+                    previewClosed = true;
+                    closePreview.Stop();
+                }
             };
             closePreview.Start();
             var watch = Stopwatch.StartNew();

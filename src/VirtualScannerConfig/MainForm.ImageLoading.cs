@@ -16,9 +16,10 @@ public sealed partial class MainForm
     private readonly Label imageLoadingLabel = new();
     private readonly LinkLabel cancelImageLoadingLink = new();
     private readonly LinkLabel retryImageLoadingLink = new();
-    private readonly Button triggerScanButton = new();
+    private readonly Button triggerScanButton = new ActionButton();
     private CancellationTokenSource? rememberedImageRestoreCancellation;
     private int pendingThumbnailLoads;
+    private int failedThumbnailCount;
     private ScannerImageSelection[]? pendingImageImport;
     private int nextImportOffset;
     private bool importIsRemembered;
@@ -33,6 +34,7 @@ public sealed partial class MainForm
             AutoSize = true, Dock = DockStyle.Top, Margin = new Padding(0, 6, 0, 0), WrapContents = true,
         };
         imageLoadingLabel.AutoSize = true;
+        panel.Controls.Add(imageLoadingIndicator);
         imageLoadingLabel.MaximumSize = new Size(480, 0);
         imageLoadingLabel.ForeColor = MutedTextColor;
         imageLoadingLabel.Margin = new Padding(0, 2, 10, 0);
@@ -50,13 +52,7 @@ public sealed partial class MainForm
         cancelImageLoadingLink.LinkClicked += (_, _) => StopImageLoading(showMessage: true);
         retryImageLoadingLink.LinkClicked += (_, _) => RetryImageLoading();
         abortImageLoadingLink.Text = "中止加载";
-        abortImageLoadingLink.LinkClicked += (_, _) =>
-        {
-            StopImageLoading(showMessage: false);
-            imageLoadingPaused = true;
-            imageLoadingLabel.Text = "本次加载已中止，已加入的图片和记忆记录已保留。";
-            UpdateImageLoadingActions();
-        };
+        abortImageLoadingLink.LinkClicked += (_, _) => AbortImageImport();
         return panel;
     }
 
@@ -65,9 +61,11 @@ public sealed partial class MainForm
         bool importing = rememberedImageRestoreCancellation is not null;
         cancelImageLoadingLink.Visible = !imageLoadingPaused && (importing || pendingThumbnailLoads > 0);
         retryImageLoadingLink.Text = imageLoadingPaused || pendingImageImport is not null ? "继续加载" : "重试本页";
-        retryImageLoadingLink.Visible = !importing && (imageLoadingPaused || imageLoadingLabel.Text.Length > 0);
+        retryImageLoadingLink.Visible = !importing && pendingThumbnailLoads == 0 &&
+            (imageLoadingPaused || pendingImageImport is not null || failedThumbnailCount > 0);
         abortImageLoadingLink.Visible = importing || pendingImageImport is not null || pendingThumbnailLoads > 0;
         triggerScanButton.Enabled = !importing;
+        UpdateQueueBusyState();
     }
 
     private void StopImageLoading(bool showMessage)
@@ -84,9 +82,9 @@ public sealed partial class MainForm
             nextImportOffset = 0;
         }
 
-        imageLoadingLabel.Text = showMessage
-            ? $"已取消加载，已加入 {nextImportOffset} 张；可继续剩余图片或中止本次加载。"
-            : string.Empty;
+        imageLoadingLabel.Text = !showMessage ? string.Empty : pendingImageImport is null
+            ? "已取消本页预览，图片队列已保留；可继续加载或开始扫描。"
+            : $"已取消加载，已加入 {nextImportOffset} 张；可继续剩余图片或中止本次加载。";
         UpdateImageLoadingActions();
     }
 
@@ -100,6 +98,7 @@ public sealed partial class MainForm
         }
 
         loadedThumbnailKeys.Clear();
+        failedThumbnailCount = 0;
         imageLoadingLabel.Text = string.Empty;
         foreach (Control control in thumbnailStrip.Controls)
         {
@@ -160,6 +159,7 @@ public sealed partial class MainForm
 
                 RefreshQueueVisuals();
                 imageLoadingLabel.Text = $"正在{(importIsRemembered ? "恢复" : "加入")}图片 {nextImportOffset}/{images.Length}（可取消后继续）…";
+                UpdateQueueBusyState();
             }
 
             if (IsCurrentRestore(cancellation))
@@ -222,6 +222,7 @@ public sealed partial class MainForm
         CancellationToken cancellationToken)
     {
         pendingThumbnailLoads++;
+        if (imageLoadingLabel.Text.Length == 0) imageLoadingLabel.Text = "正在加载本页预览，可以继续浏览或取消加载。";
         UpdateImageLoadingActions();
         try
         {
@@ -245,6 +246,7 @@ public sealed partial class MainForm
             }
 
             bool canceled = cancellationToken.IsCancellationRequested;
+            if (!canceled) failedThumbnailCount++;
             string text = canceled ? "已取消" : exception is TimeoutException ? "加载超时" : "无法读取";
             ReplacePictureBoxImage(state.PictureBox, CreateFallbackThumbnail(size, text + "\n可重试"));
             if (rememberedImageRestoreCancellation is null && !canceled)
@@ -260,6 +262,11 @@ public sealed partial class MainForm
         finally
         {
             pendingThumbnailLoads--;
+            if (IsCurrentThumbnail(state, requestId))
+            {
+                state.LoadingIndicator.Active = false;
+                state.LoadingIndicator.Visible = false;
+            }
             if (!IsDisposed && !Disposing)
             {
                 UpdateImageLoadingActions();
@@ -268,7 +275,7 @@ public sealed partial class MainForm
     }
 
     private bool IsCurrentThumbnail(ThumbnailTileState state, int requestId)
-        => !IsDisposed && !Disposing && !state.PictureBox.IsDisposed && state.ThumbnailRequestId == requestId;
+        => !disposingImageUi && !IsDisposed && !Disposing && !state.PictureBox.IsDisposed && state.ThumbnailRequestId == requestId;
 
     private sealed class LoadedThumbnail(ThumbnailCacheKey key, Bitmap bitmap) : IDisposable
     {
