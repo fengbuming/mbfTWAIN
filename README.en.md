@@ -1,7 +1,7 @@
 # mbfTwain — Virtual TWAIN Scanner
 
 [![License: PolyForm Noncommercial](https://img.shields.io/badge/License-PolyForm%20Noncommercial-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-1.2.0-brightgreen.svg)](https://github.com/fengbuming/mbfTWAIN/releases)
+[![Version](https://img.shields.io/badge/version-1.3.0-brightgreen.svg)](https://github.com/fengbuming/mbfTWAIN/releases)
 
 **English** | [中文](README.md)
 
@@ -26,7 +26,7 @@ Current progress covers Phase 1 through Phase 4a scaffolding: the native DS modu
 
 ![Main Window](docs/assets/readme_img1.png)
 
-The main window displays the pending-scan image queue. Arrows on either side of each thumbnail adjust the order — the list order is the scan transfer order. Click "Add Image" to append new images, and "Start Scan" to transfer them to the TWAIN host in queue order. The status bar at the bottom shows queue length, current page, pixel format, paper size, DPI, and connection state in real time.
+The main window displays the pending-scan image queue. Thumbnail arrows adjust the transfer order. In an empty queue, choose images, review their order, then click "Start Scan". Transfer progress, pause, and image recovery stay in the same window. Loading status occupies a fixed area without covering the queue. Thumbnails, full previews, and transfer preparation use separate bounded readers so slow thumbnails do not delay an explicit preview or transfer. The footer shows queue status and scan settings.
 
 ### Scan Settings — Parameter Configuration and Update Check
 
@@ -114,7 +114,7 @@ For an installed TWAIN source, copy the `.ds` file and the `mbfTwain.VirtualScan
 Build and package a release installer with the local Inno Setup 6 installation:
 
 ```powershell
-.\tools\Build-Release.ps1 -Version 1.2.0 -InnoSetupPath "D:\Program Files (x86)\Inno Setup 6"
+.\tools\Build-Release.ps1 -Version 1.3.0 -InnoSetupPath "D:\Program Files (x86)\Inno Setup 6"
 ```
 
 The script reuses `Install-LocalTwain.ps1` in build-only mode, stages both Win32 and x64 TWAIN source builds, runs the smoke tests unless `-SkipSmoke` is passed, then writes:
@@ -127,7 +127,7 @@ build\release\mbfTwain-Setup-v<version>.exe.sha256
 Publish the committed build to GitHub Releases after packaging:
 
 ```powershell
-.\tools\Publish-GitHubRelease.ps1 -Version 1.2.0
+.\tools\Publish-GitHubRelease.ps1 -Version 1.3.0
 ```
 
 The installer copies the DS and UI runtime files into `C:\Windows\twain_32` and `C:\Windows\twain_64`, and sets the machine environment variable `MBF_TWAIN_FORCE_UI=1`.

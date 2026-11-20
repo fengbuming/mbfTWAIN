@@ -17,13 +17,18 @@ public sealed partial class MainForm
             Padding = new Padding(18, 16, 18, 16),
             BackColor = SurfaceBackground,
         };
-        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 132));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
         layout.Controls.Add(BuildQueueHeader(), 0, 0);
 
-        thumbnailStrip.Dock = DockStyle.Fill;
-        thumbnailStrip.AutoScroll = true;
+        // Let the viewport own scrolling. An auto-sized wrapping strip avoids
+        // the competing horizontal/vertical scrollbar passes of a scrolling
+        // FlowLayoutPanel as thumbnails and action controls appear.
+        thumbnailStrip.Dock = DockStyle.Top;
+        thumbnailStrip.AutoSize = true;
+        thumbnailStrip.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+        thumbnailStrip.AutoScroll = false;
         thumbnailStrip.WrapContents = true;
         thumbnailStrip.FlowDirection = FlowDirection.LeftToRight;
         thumbnailStrip.Margin = new Padding(0);
@@ -44,17 +49,17 @@ public sealed partial class MainForm
             Dock = DockStyle.Top,
             ColumnCount = 3,
             RowCount = 4,
-            AutoSize = true,
+            Height = 132,
             BackColor = SurfaceBackground,
             Margin = new Padding(0),
         };
         header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        header.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        header.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        header.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        header.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        header.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
+        header.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
+        header.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
+        header.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
         header.Controls.Add(
             new Label
@@ -88,7 +93,8 @@ public sealed partial class MainForm
 
         var subtitle = new Label
         {
-            AutoSize = true,
+            Dock = DockStyle.Fill,
+            AutoEllipsis = true,
             Text = "用缩略图两侧箭头调整顺序，列表顺序就是扫描传输顺序。",
             ForeColor = MutedTextColor,
             Margin = new Padding(0, 6, 0, 0),

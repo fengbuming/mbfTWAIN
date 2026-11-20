@@ -6,9 +6,9 @@ namespace MbfTwain.VirtualScannerConfig;
 
 public sealed partial class MainForm
 {
-    private readonly WaitOverlay queueWaitOverlay = new();
     private readonly BusyIndicator imageLoadingIndicator = new() { Margin = new Padding(0, 0, 6, 0) };
-    private readonly Panel queueViewport = new() { Dock = DockStyle.Fill, Margin = new Padding(0, 18, 0, 0) };
+    private readonly Panel queueViewport = new StableScrollPanel { Dock = DockStyle.Fill, AutoScroll = true, Margin = new Padding(0, 18, 0, 0) };
+    private Point queueScrollBeforeTransfer;
     private bool disposingImageUi;
     private bool queueUiInitialized;
 
@@ -25,9 +25,6 @@ public sealed partial class MainForm
     private void InitializeQueueBusyState()
     {
         queueViewport.Controls.Add(thumbnailStrip);
-        queueViewport.Controls.Add(queueWaitOverlay);
-        queueWaitOverlay.CancelRequested += (_, _) => StopImageLoading(showMessage: true);
-        queueWaitOverlay.AbortRequested += (_, _) => AbortImageImport();
         queueUiInitialized = true;
         UpdateQueueBusyState();
     }
@@ -56,20 +53,9 @@ public sealed partial class MainForm
         previousQueuePageButton.Enabled = editing && queuePageIndex > 0;
         nextQueuePageButton.Enabled = editing && (queuePageIndex + 1) * QueuePageSize < count;
         triggerScanButton.Enabled = editing;
-        triggerScanButton.Text = importing ? "正在加载…" : "开始扫描";
+        triggerScanButton.Text = scanRequested ? "正在送图…" : importing ? "正在加载…" : count == 0 ? "选择图片" : "开始扫描";
         imageLoadingIndicator.Active = !imageLoadingPaused && (importing || pendingThumbnailLoads > 0);
-        imageLoadingIndicator.Visible = imageLoadingIndicator.Active;
-        if (importing)
-        {
-            queueWaitOverlay.ShowLoading(thumbnailStrip, importIsRemembered ? "正在恢复图片队列" : "正在加入图片",
-                $"已加入 {nextImportOffset}/{pendingImageImport?.Length ?? nextImportOffset} 张 · 可以取消后继续",
-                nextImportOffset, pendingImageImport?.Length ?? nextImportOffset);
-            thumbnailStrip.Visible = false;
-        }
-        else
-        {
-            queueWaitOverlay.Dismiss();
-            thumbnailStrip.Visible = true;
-        }
+        // Keep the indicator's cell and queue geometry even when it is idle.
+        thumbnailStrip.Visible = transferProgressView is null;
     }
 }

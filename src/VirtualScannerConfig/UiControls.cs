@@ -6,6 +6,30 @@ using System.Windows.Forms;
 
 namespace MbfTwain.VirtualScannerConfig;
 
+internal sealed class BufferedFlowLayoutPanel : FlowLayoutPanel
+{
+    public BufferedFlowLayoutPanel() => DoubleBuffered = true;
+}
+
+internal sealed class StableScrollPanel : Panel
+{
+    public StableScrollPanel() => DoubleBuffered = true;
+
+    protected override void OnLayout(LayoutEventArgs e)
+    {
+        // Reserve the scrollbar's width before it appears, so background
+        // imports cannot change the wrapping width of the thumbnail grid.
+        int width = Math.Max(1, Width - SystemInformation.VerticalScrollBarWidth);
+        foreach (Control child in Controls)
+        {
+            if (child is not BufferedFlowLayoutPanel || child.MinimumSize.Width == width) continue;
+            child.MinimumSize = new Size(width, 0);
+            child.MaximumSize = new Size(width, 0);
+        }
+        base.OnLayout(e);
+    }
+}
+
 internal sealed class ActionButton : Button
 {
     private bool hovered;
@@ -122,93 +146,4 @@ internal sealed class StateLinkLabel : LinkLabel
         TextRenderer.DrawText(e.Graphics, Text, Font, ClientRectangle, Color.FromArgb(117, 127, 119),
             TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
     }
-}
-
-internal sealed class WaitOverlay : Panel
-{
-    private readonly TableLayoutPanel surface;
-    private readonly BusyIndicator indicator = new() { Anchor = AnchorStyles.None, Size = new Size(32, 32) };
-    private readonly Label title = new() { AutoSize = true, Anchor = AnchorStyles.None, Margin = new Padding(8) };
-    private readonly Label detail = new() { AutoSize = true, Anchor = AnchorStyles.None, Margin = new Padding(8, 0, 8, 10), MaximumSize = new Size(390, 0) };
-    private readonly ProgressBar progress = new() { Width = 280, Height = 6, Anchor = AnchorStyles.None, Maximum = 1000 };
-    private readonly ActionButton cancel = new() { Text = "取消加载", Width = 112, Height = 32 };
-    private readonly ActionButton abort = new() { Text = "中止加载", Width = 112, Height = 32 };
-    private Bitmap? backdrop;
-    private bool showing;
-
-    internal event EventHandler? CancelRequested;
-    internal event EventHandler? AbortRequested;
-    internal bool IsBusy => indicator.Active;
-    internal bool IsShowing => showing;
-
-    public WaitOverlay()
-    {
-        Dock = DockStyle.Fill;
-        Visible = false;
-        TabStop = false;
-        BackColor = Color.FromArgb(247, 249, 245);
-        SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
-        surface = new TableLayoutPanel
-        {
-            ColumnCount = 1, RowCount = 5, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            BackColor = Color.FromArgb(255, 255, 252), Padding = new Padding(20, 14, 20, 14),
-        };
-        surface.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        for (int row = 0; row < 5; row++) surface.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        title.Font = new Font(Font, FontStyle.Bold);
-        detail.ForeColor = Color.FromArgb(94, 104, 97);
-        detail.TextAlign = ContentAlignment.MiddleCenter;
-        surface.Controls.Add(indicator, 0, 0);
-        surface.Controls.Add(title, 0, 1);
-        surface.Controls.Add(detail, 0, 2);
-        surface.Controls.Add(progress, 0, 3);
-        var actions = new FlowLayoutPanel { AutoSize = true, Anchor = AnchorStyles.None, Margin = new Padding(0, 8, 0, 0) };
-        actions.Controls.AddRange([cancel, abort]);
-        surface.Controls.Add(actions, 0, 4);
-        Controls.Add(surface);
-        cancel.Click += (_, _) => CancelRequested?.Invoke(this, EventArgs.Empty);
-        abort.Click += (_, _) => AbortRequested?.Invoke(this, EventArgs.Empty);
-        surface.SizeChanged += (_, _) => CenterSurface();
-    }
-
-    internal void ShowLoading(Control? content, string caption, string description, int completed = 0, int total = 0, bool allowAbort = true)
-    {
-        if (!showing && content is { Width: > 0, Height: > 0 })
-        {
-            backdrop?.Dispose();
-            backdrop = new Bitmap(content.Width, content.Height);
-            content.DrawToBitmap(backdrop, new Rectangle(Point.Empty, content.Size));
-        }
-        title.Text = caption;
-        showing = true;
-        detail.Text = description;
-        indicator.Active = true;
-        abort.Visible = allowAbort;
-        progress.Visible = total > 0;
-        progress.Value = total <= 0 ? 0 : (int)Math.Clamp(completed * 1000L / total, 0, 1000);
-        Visible = true;
-        BringToFront();
-        CenterSurface();
-    }
-
-    internal void Dismiss()
-    {
-        indicator.Active = false;
-        showing = false;
-        Visible = false;
-        backdrop?.Dispose();
-        backdrop = null;
-    }
-
-    private void CenterSurface() => surface.Location = new Point(Math.Max(0, (Width - surface.Width) / 2), Math.Max(0, (Height - surface.Height) / 2));
-    protected override void OnSizeChanged(EventArgs e) { base.OnSizeChanged(e); if (surface is not null) CenterSurface(); }
-    protected override void OnPaintBackground(PaintEventArgs e)
-    {
-        base.OnPaintBackground(e);
-        if (backdrop is null) return;
-        e.Graphics.DrawImage(backdrop, ClientRectangle);
-        using var veil = new SolidBrush(Color.FromArgb(224, BackColor));
-        e.Graphics.FillRectangle(veil, ClientRectangle);
-    }
-    protected override void Dispose(bool disposing) { if (disposing) backdrop?.Dispose(); base.Dispose(disposing); }
 }

@@ -52,7 +52,7 @@ public sealed partial class MainForm
         lock (stateLock) count = selectedImages.Count;
         queuePageIndex = Math.Clamp(pageIndex, 0, Math.Max(0, (count - 1) / QueuePageSize));
         hoveredImageIndex = -1;
-        thumbnailStrip.AutoScrollPosition = Point.Empty;
+        queueViewport.AutoScrollPosition = Point.Empty;
         RefreshQueueVisuals();
     }
 

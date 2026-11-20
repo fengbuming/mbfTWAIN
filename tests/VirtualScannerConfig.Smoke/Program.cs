@@ -27,6 +27,7 @@ internal static class Program
             {
                 VerifyBackgroundReads();
                 VerifyInteractionStates(directory);
+                VerifyInitialSessionContinuity(directory);
                 if (!arguments.Contains("--interaction-only"))
                 {
                 VerifyRestoration(directory);
@@ -73,6 +74,15 @@ internal static class Program
             Task<Probe> timed = Read(() => { entered.Signal(); release.Wait(); return first; }, CancellationToken.None, 250);
             Task<Probe> canceled = Read(() => { entered.Signal(); release.Wait(); return second; }, cancellation.Token, 2000);
             Check(entered.Wait(2000), "two blocked file reads started in background");
+            Type reader = typeof(MainForm).Assembly.GetType("MbfTwain.VirtualScannerConfig.ImageFileOperations")!;
+            foreach (string lane in new[] { "RunPreviewAsync", "RunTransferAsync" })
+            {
+                var foreground = (Task<Probe>)reader.GetMethod(lane, BindingFlags.Static | BindingFlags.NonPublic)!
+                    .MakeGenericMethod(typeof(Probe)).Invoke(null, [new Func<Probe>(() => new Probe()), CancellationToken.None])!;
+                PumpUntil(() => foreground.IsCompleted, 1000);
+                using Probe foregroundResult = foreground.GetAwaiter().GetResult();
+                Check(!foregroundResult.Disposed, lane + " proceeds independently of stalled thumbnails");
+            }
             cancellation.Cancel();
             PumpUntil(() => timed.IsCompleted && canceled.IsCompleted, 1500);
             Check(timed.IsFaulted && timed.Exception!.InnerException is TimeoutException, "blocked read times out without waiting for OS call");
@@ -115,29 +125,51 @@ internal static class Program
         form.Show();
         var images = Enumerable.Range(0, 500).Select(_ => new ScannerImageSelection(path, 0)).ToArray();
         Invoke(form, "StartImageImport", images, false);
-        Control overlay = Get<Control>(form, "queueWaitOverlay");
-        Check(overlay.Visible && !Get<FlowLayoutPanel>(form, "thumbnailStrip").Enabled &&
+        var strip = Get<FlowLayoutPanel>(form, "thumbnailStrip");
+        Control viewport = Get<Control>(form, "queueViewport");
+        Rectangle windowBounds = form.Bounds;
+        Rectangle viewportBounds = viewport.Parent!.RectangleToScreen(viewport.Bounds);
+        int gridWidth = strip.Width;
+        bool geometryStable = true;
+        using var geometrySampler = new System.Windows.Forms.Timer { Interval = 10 };
+        geometrySampler.Tick += (_, _) => geometryStable &= form.Bounds == windowBounds &&
+            viewport.Parent!.RectangleToScreen(viewport.Bounds) == viewportBounds && strip.Width == gridWidth;
+        geometrySampler.Start();
+        Check(strip.Visible && !strip.Enabled &&
             !Get<CheckBox>(form, "rememberImagesCheckBox").Enabled && !Get<Button>(form, "settingsButton").Enabled,
-            "import mask protects the queue and conflicting settings without blocking cancellation");
-        Check(overlay.Width > 400 && overlay.Height > 200 && overlay.Parent!.Controls.GetChildIndex(overlay) == 0,
-            "loading mask covers the viewport above the queue");
+            "import keeps the queue in place while disabling conflicting edits");
         Button trigger = Get<Button>(form, "triggerScanButton");
         Check(!trigger.Enabled && trigger.Text.Contains("加载") && trigger.Cursor == Cursors.Default,
             "disabled primary action has loading copy and an inactive cursor");
         SavePreview(form, Path.Combine(previewDirectory, "01-import-loading.png"));
-        SavePreview(overlay, Path.Combine(previewDirectory, "01b-import-overlay.png"));
-        Get<Button>(overlay, "cancel").PerformClick();
-        Check(!overlay.Visible && Get<FlowLayoutPanel>(form, "thumbnailStrip").Enabled && trigger.Enabled,
-            "mask cancel immediately restores the working surface");
+        Invoke(form, "StopImageLoading", true);
+        Check(strip.Visible && strip.Enabled && trigger.Enabled,
+            "cancel immediately restores the working surface without a mask transition");
         Invoke(form, "RetryImageLoading");
         PumpUntil(() => Get<object?>(form, "rememberedImageRestoreCancellation") is null && Get<int>(form, "pendingThumbnailLoads") == 0, 4000);
-        Check(!overlay.Visible && trigger.Text == "开始扫描" && Get<CheckBox>(form, "rememberImagesCheckBox").Enabled,
-            "successful resume clears the mask, spinner and disabled states");
+        Check(trigger.Text == "开始扫描" && Get<CheckBox>(form, "rememberImagesCheckBox").Enabled && !Snapshot(form).ScanRequested,
+            "selection finishes in a reviewable queue and waits for an explicit start");
         Check(!Get<LinkLabel>(form, "retryImageLoadingLink").Visible,
             "successful loading does not leave an unnecessary retry action");
         Check(!Get<Button>(form, "previousQueuePageButton").Enabled && Get<Button>(form, "nextQueuePageButton").Enabled,
             "pagination makes unavailable and available navigation distinct");
+        Check(geometryStable, $"import, cancel and resume keep window, viewport and grid geometry stable (grid {gridWidth}/{strip.Width})");
+        var scrollingViewport = (ScrollableControl)viewport;
+        Check(scrollingViewport.AutoScrollPosition == Point.Empty, "background loading does not scroll the queue to a newly focused action");
+        Check(!scrollingViewport.HorizontalScroll.Visible,
+            $"the queue wraps without horizontal overflow (viewport {viewport.ClientSize}, extent {viewport.DisplayRectangle})");
         SavePreview(form, Path.Combine(previewDirectory, "02-queue-ready.png"));
+        object tileState = strip.Controls[0].Tag!;
+        int request = (int)tileState.GetType().GetProperty("ThumbnailRequestId")!.GetValue(tileState)!;
+        Invoke(form, "RefreshQueueVisuals");
+        Check((int)tileState.GetType().GetProperty("ThumbnailRequestId")!.GetValue(tileState)! == request,
+            "refreshing an unchanged page preserves its thumbnail request");
+        Invoke(form, "SetHoveredImage", 1);
+        Control[] actions = strip.Controls[1].Controls.OfType<Button>().ToArray();
+        Invoke(form, "SetHoveredImage", 2);
+        Invoke(form, "SetHoveredImage", 1);
+        Check(actions.Length == 5 && actions.All(action => !action.IsDisposed && strip.Controls[1].Controls.Contains(action)),
+            "hover reuses action controls instead of recreating their window handles");
         using (var enabled = new Bitmap(trigger.Width, trigger.Height))
         using (var disabled = new Bitmap(trigger.Width, trigger.Height))
         {
@@ -148,31 +180,59 @@ internal static class Program
             trigger.Enabled = true;
         }
 
-        Type dialogType = typeof(MainForm).Assembly.GetType("MbfTwain.VirtualScannerConfig.TransferProgressDialog")!;
-        using var transfer = (Form)Activator.CreateInstance(dialogType)!;
-        transfer.Show();
-        MethodInfo update = dialogType.GetMethod("UpdateProgress")!;
-        MethodInfo pause = dialogType.GetMethod("SetPaused")!;
-        update.Invoke(transfer, [7u, 0, 500, true]);
-        pause.Invoke(transfer, [false, null, false]);
+        int openWindows = Application.OpenForms.Count;
+        Invoke(form, "TriggerScan");
+        Control transfer = Get<Control>(form, "transferProgressView");
+        Type viewType = transfer.GetType();
+        MethodInfo update = viewType.GetMethod("UpdateProgress")!;
+        MethodInfo pause = viewType.GetMethod("SetPaused")!;
+        Check(form.Visible && form.Enabled && transfer.Parent == viewport && transfer.Visible && Application.OpenForms.Count == openWindows,
+            "transfer stays in the same main window without opening a progress dialog");
+        Check(!trigger.Enabled && !strip.Visible && !Get<CheckBox>(form, "rememberImagesCheckBox").Enabled,
+            "transfer protects the selection while keeping pause and abort available");
+        Rectangle detailBounds = Get<Label>(transfer, "detailLabel").Bounds;
+        Rectangle actionsBounds = Get<Button>(transfer, "cancelButton").RectangleToScreen(Get<Button>(transfer, "cancelButton").ClientRectangle);
         Check(Get<ProgressBar>(transfer, "progressBar").Style == ProgressBarStyle.Marquee &&
             Get<Button>(transfer, "cancelButton").Enabled && !Get<Button>(transfer, "continueButton").Enabled,
             "TWAIN waiting state animates while only valid actions are enabled");
-        SavePreview(transfer, Path.Combine(previewDirectory, "03-transfer-waiting.png"));
-        update.Invoke(transfer, [7u, 28, 500, false]);
-        pause.Invoke(transfer, [true, "第 29 张读取超时：\\\\fileserver\\扫描图片\\第29张.jpg\n可重试此图、跳过、更换图片或中止扫描。", true]);
+        SavePreview(form, Path.Combine(previewDirectory, "03-transfer-waiting.png"));
+        uint scanRevision = Get<uint>(form, "activeScanRevision");
+        Invoke(form, "HideScanUi", scanRevision);
+        Check(form.Visible, "the host hide request preserves the active transfer workspace");
+        for (int completed = 1; completed <= 28; completed++) Invoke(form, "QueueTransferProgress", scanRevision, completed, 500);
+        PumpFor(50);
+        Check(Get<Label>(transfer, "detailLabel").Text.Contains("28/500"), "queued progress converges to the latest count");
+        pause.Invoke(transfer, [true, "第 29 张读取超时：网络图片暂时不可访问。\n可重试此图、跳过、更换图片或中止扫描。", true]);
         Check(Get<ProgressBar>(transfer, "progressBar").Style == ProgressBarStyle.Continuous &&
             !Get<Button>(transfer, "cancelButton").Enabled && Get<Button>(transfer, "continueButton").Enabled &&
             Get<Button>(transfer, "skipButton").Visible && Get<Button>(transfer, "replaceButton").Visible,
             "image failure stops loading animation and enables explicit recovery actions");
-        SavePreview(transfer, Path.Combine(previewDirectory, "04-transfer-needs-action.png"));
+        Check(detailBounds == Get<Label>(transfer, "detailLabel").Bounds &&
+            actionsBounds == Get<Button>(transfer, "cancelButton").RectangleToScreen(Get<Button>(transfer, "cancelButton").ClientRectangle),
+            "error text and recovery actions do not move the transfer controls");
+        SavePreview(form, Path.Combine(previewDirectory, "04-transfer-needs-action.png"));
+        foreach (Size size in new[] { form.MinimumSize, new Size(1120, 760), windowBounds.Size })
+        {
+            form.Size = size;
+            form.PerformLayout();
+            Rectangle area = viewport.RectangleToScreen(viewport.ClientRectangle);
+            Check(area.Contains(Get<Button>(transfer, "abortButton").RectangleToScreen(Get<Button>(transfer, "abortButton").ClientRectangle)) &&
+                area.Contains(Get<Button>(transfer, "skipButton").RectangleToScreen(Get<Button>(transfer, "skipButton").ClientRectangle)),
+                "transfer actions fit inside the viewport at minimum, default and larger sizes");
+        }
+        form.Bounds = windowBounds;
         pause.Invoke(transfer, [false, null, false]);
         Check(!Get<Button>(transfer, "skipButton").Visible && !Get<Button>(transfer, "continueButton").Enabled,
             "resume clears stale failure actions");
-        update.Invoke(transfer, [7u, 500, 500, false]);
+        update.Invoke(transfer, [scanRevision, 500, 500, false]);
         pause.Invoke(transfer, [false, null, false]);
         Check(!Get<Button>(transfer, "cancelButton").Enabled && !Get<Button>(transfer, "abortButton").Enabled,
             "completion disables repeated cancel and abort actions");
+        form.Close();
+        geometrySampler.Stop();
+        Check(!form.IsDisposed && !Snapshot(form).ScanRequested && form.Visible && strip.Visible && trigger.Enabled && form.Bounds == windowBounds &&
+            viewport.Parent!.RectangleToScreen(viewport.Bounds) == viewportBounds,
+            "closing the transfer returns to the same queue and publishes cancellation without closing the pipe");
 
         using var canceledUpdate = new CancellationTokenSource();
         canceledUpdate.Cancel();
@@ -190,6 +250,29 @@ internal static class Program
         using var bitmap = new Bitmap(control.Width, control.Height);
         control.DrawToBitmap(bitmap, new Rectangle(Point.Empty, control.Size));
         bitmap.Save(path, System.Drawing.Imaging.ImageFormat.Png);
+    }
+
+    private static void VerifyInitialSessionContinuity(string directory)
+    {
+        using var form = CreateForm(directory);
+        string path = Path.Combine(directory, "interaction.bmp");
+        var images = Enumerable.Range(0, 500).Select(_ => new ScannerImageSelection(path, 0)).ToArray();
+        Set(form, "rememberSelectedImages", true);
+        Set(form, "rememberedImages", images);
+        Invoke(form, "StartRememberedImageRestore");
+        PumpUntil(() => Snapshot(form).SelectedImages.Count >= 32, 2000);
+        object restore = Get<object>(form, "rememberedImageRestoreCancellation");
+        Invoke(form, "BeginScanSession", (object?)null);
+        Check(ReferenceEquals(restore, Get<object>(form, "rememberedImageRestoreCancellation")),
+            "the first host session reuses startup restoration instead of clearing and restarting it");
+        PumpUntil(() => Get<object?>(form, "rememberedImageRestoreCancellation") is null && Get<int>(form, "pendingThumbnailLoads") == 0, 4000);
+        Check(Snapshot(form).SelectedImages.SequenceEqual(images), "startup and host handshake restore exactly one queue");
+        Invoke(form, "ChangeQueuePage", 41);
+        Invoke(form, "StartImageImport", images.Take(32).ToArray(), false);
+        PumpUntil(() => Get<object?>(form, "rememberedImageRestoreCancellation") is null, 4000);
+        Check(Snapshot(form).SelectedImages.Count == 532 && Get<NumericUpDown>(form, "queuePageInput").Maximum == 45,
+            "appending images retains the existing queue and computes pagination from the full count");
+        PumpUntil(() => Get<int>(form, "pendingThumbnailLoads") == 0, 4000);
     }
 
     private static void VerifyRestoration(string directory)
@@ -254,12 +337,11 @@ internal static class Program
                 Form? preview = Application.OpenForms.Cast<Form>().FirstOrDefault(window => window.Text == Path.GetFileName(imagePath));
                 if (preview is not null)
                 {
-                    Control previewMask = preview.Controls.Cast<Control>().Single(control => control.GetType().Name == "WaitOverlay");
-                    Check(previewMask.Visible && Get<Button>(previewMask, "cancel").Enabled,
-                        "preview has a visible loading mask with an enabled cancel action");
-                    string previewPath = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../build/ui-previews/05-preview-loading.png"));
-                    SavePreview(preview, previewPath);
-                    Get<Button>(previewMask, "cancel").PerformClick();
+                    var viewer = preview.Controls.OfType<PictureBox>().Single();
+                    Button close = preview.Controls.OfType<Panel>().Single().Controls.OfType<Button>().Single(button => button.Text == "关闭预览");
+                    Check(viewer.Visible && viewer.Image is not null && close.Enabled,
+                        "full preview loads through its own reader lane while thumbnail readers remain blocked");
+                    close.PerformClick();
                     previewClosed = true;
                     closePreview.Stop();
                 }
@@ -267,7 +349,7 @@ internal static class Program
             closePreview.Start();
             var watch = Stopwatch.StartNew();
             Invoke(form, "ShowFullscreenPreview", 0);
-            Check(previewClosed && watch.ElapsedMilliseconds < 1500, "preview closes immediately while its image read stalls");
+            Check(previewClosed && watch.ElapsedMilliseconds < 1500, "preview closes immediately while thumbnail reads stall");
             Invoke(form, "ClearImages");
             release.Set(); cancellation.Cancel();
             PumpUntil(() => blocked.All(task => task.IsCompleted), 1500);
@@ -305,7 +387,7 @@ internal static class Program
             "continue preserves the active scan identity");
         Invoke(form, "GetTransferImageResponse", scanRevision, 499);
         PumpUntil(() => Snapshot(form).TransferPaused, 3000);
-        Check(Get<object?>(form, "transferProgressDialog") is not null,
+        Check(Get<object?>(form, "transferProgressView") is not null,
             "unreadable transfer image pauses delivery with continue and abort controls");
         File.Copy(imagePath, images[499].Path);
         Invoke(form, "ResumeTransfer");

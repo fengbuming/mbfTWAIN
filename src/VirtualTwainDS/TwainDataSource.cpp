@@ -2437,7 +2437,7 @@ TW_IDENTITY VirtualTwainDataSource::BuildSourceIdentity() noexcept
     identity.Version.MinorNum = 2;
     identity.Version.Language = TWLG_ENGLISH_USA;
     identity.Version.Country = TWCY_USA;
-    CopyTwainString(identity.Version.Info, sizeof(identity.Version.Info), "mbfTwain 1.2.0");
+    CopyTwainString(identity.Version.Info, sizeof(identity.Version.Info), "mbfTwain 1.3.0");
 
     identity.ProtocolMajor = TWON_PROTOCOLMAJOR;
     identity.ProtocolMinor = TWON_PROTOCOLMINOR;

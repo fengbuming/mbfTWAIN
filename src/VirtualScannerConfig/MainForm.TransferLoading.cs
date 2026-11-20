@@ -18,6 +18,52 @@ public sealed partial class MainForm
     private int failedTransferImageIndex = -1;
     private Form? transferSummaryDialog;
     private bool exitAfterTransferSummary;
+    private (uint Revision, int Completed, int Total) pendingTransferProgress;
+    private bool transferProgressPosted;
+    private (uint Revision, bool Reading) pendingReadingState;
+    private bool readingStatePosted;
+
+    private void QueueTransferProgress(uint scanRevision, int completed, int total)
+    {
+        lock (stateLock)
+        {
+            if (!scanRequested || activeScanRevision != scanRevision) return;
+            pendingTransferProgress = (scanRevision, completed, total);
+            if (transferProgressPosted) return;
+            transferProgressPosted = true;
+        }
+        PostPipeCallback(() =>
+        {
+            (uint Revision, int Completed, int Total) progress;
+            lock (stateLock)
+            {
+                progress = pendingTransferProgress;
+                transferProgressPosted = false;
+            }
+            ApplyTransferProgress(progress.Revision, progress.Completed, progress.Total);
+        });
+    }
+
+    private void QueueTransferReadingState(uint scanRevision, bool reading)
+    {
+        lock (stateLock)
+        {
+            if (!scanRequested || activeScanRevision != scanRevision) return;
+            if (pendingReadingState == (scanRevision, reading)) return;
+            pendingReadingState = (scanRevision, reading);
+            if (readingStatePosted) return;
+            readingStatePosted = true;
+        }
+        PostPipeCallback(() =>
+        {
+            lock (stateLock)
+            {
+                readingStatePosted = false;
+                if (scanRequested && activeScanRevision == pendingReadingState.Revision)
+                    transferProgressView?.SetReadingImage(pendingReadingState.Reading);
+            }
+        });
+    }
 
     private void TrackTransferProgress(uint scanRevision, int completedImages, int totalImages)
     {
@@ -54,11 +100,7 @@ public sealed partial class MainForm
         }
         string response = transferImageStager.Request(requestedRevision, index, source);
         bool reading = response == "OK WAIT\n";
-        PostPipeCallback(() =>
-        {
-            if (scanRequested && activeScanRevision == requestedRevision)
-                transferProgressDialog?.SetReadingImage(reading);
-        });
+        QueueTransferReadingState(requestedRevision, reading);
         return response;
     }
 
@@ -70,7 +112,7 @@ public sealed partial class MainForm
             transferPaused = true;
         }
         transferImageStager.Pause();
-        transferProgressDialog?.SetPaused(true, message, failedTransferImageIndex >= 0);
+        transferProgressView?.SetPaused(true, message, failedTransferImageIndex >= 0);
     }
 
     private void ResumeTransfer()
@@ -82,7 +124,7 @@ public sealed partial class MainForm
             transferPaused = false;
             failedTransferImageIndex = -1;
         }
-        transferProgressDialog?.SetPaused(false);
+        transferProgressView?.SetPaused(false);
     }
 
     private void TransferImageReadFailed(uint scanRevision, int index, string message)
@@ -113,7 +155,7 @@ public sealed partial class MainForm
             Filter = "图片文件|*.png;*.jpg;*.jpeg;*.bmp;*.tif;*.tiff|所有文件|*.*",
             Title = "选择替代图片（只替换本次扫描的此张图片）",
         };
-        if (dialog.ShowDialog(transferProgressDialog) == DialogResult.OK) ReplaceFailedTransferImageWith(dialog.FileName);
+        if (dialog.ShowDialog(this) == DialogResult.OK) ReplaceFailedTransferImageWith(dialog.FileName);
     }
 
     private void ReplaceFailedTransferImageWith(string path)

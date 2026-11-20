@@ -24,28 +24,36 @@ public sealed partial class MainForm
     private int nextImportOffset;
     private bool importIsRemembered;
     private bool imageLoadingPaused;
-    private bool scanAfterImageImport;
+    private bool initialImageRestoreStarted;
     private readonly LinkLabel abortImageLoadingLink = new();
 
     private Control BuildImageLoadingStatus()
     {
-        var panel = new FlowLayoutPanel
+        var panel = new TableLayoutPanel
         {
-            AutoSize = true, Dock = DockStyle.Top, Margin = new Padding(0, 6, 0, 0), WrapContents = true,
+            Height = 32, Dock = DockStyle.Fill, Margin = new Padding(0, 6, 0, 0),
+            ColumnCount = 5, RowCount = 1,
         };
-        imageLoadingLabel.AutoSize = true;
-        panel.Controls.Add(imageLoadingIndicator);
-        imageLoadingLabel.MaximumSize = new Size(480, 0);
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 30));
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        for (int column = 0; column < 3; column++) panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 76));
+        panel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        panel.Controls.Add(imageLoadingIndicator, 0, 0);
+        imageLoadingLabel.Dock = DockStyle.Fill;
+        imageLoadingLabel.AutoEllipsis = true;
+        imageLoadingLabel.TextAlign = ContentAlignment.MiddleLeft;
         imageLoadingLabel.ForeColor = MutedTextColor;
-        imageLoadingLabel.Margin = new Padding(0, 2, 10, 0);
-        panel.Controls.Add(imageLoadingLabel);
+        imageLoadingLabel.Margin = new Padding(0, 0, 10, 0);
+        panel.Controls.Add(imageLoadingLabel, 1, 0);
+        int actionColumn = 2;
         foreach (LinkLabel link in new[] { cancelImageLoadingLink, retryImageLoadingLink, abortImageLoadingLink })
         {
-            link.AutoSize = true;
+            link.Dock = DockStyle.Fill;
+            link.TextAlign = ContentAlignment.MiddleRight;
             link.LinkColor = Color.FromArgb(38, 100, 171);
-            link.Margin = new Padding(0, 2, 10, 0);
+            link.Margin = new Padding(0);
             link.Visible = false;
-            panel.Controls.Add(link);
+            panel.Controls.Add(link, actionColumn++, 0);
         }
 
         cancelImageLoadingLink.Text = "取消加载";
@@ -59,12 +67,20 @@ public sealed partial class MainForm
     private void UpdateImageLoadingActions()
     {
         bool importing = rememberedImageRestoreCancellation is not null;
-        cancelImageLoadingLink.Visible = !imageLoadingPaused && (importing || pendingThumbnailLoads > 0);
+        bool showCancel = !scanRequested && !imageLoadingPaused && (importing || pendingThumbnailLoads > 0);
         retryImageLoadingLink.Text = imageLoadingPaused || pendingImageImport is not null ? "继续加载" : "重试本页";
-        retryImageLoadingLink.Visible = !importing && pendingThumbnailLoads == 0 &&
+        bool showRetry = !scanRequested && !importing && pendingThumbnailLoads == 0 &&
             (imageLoadingPaused || pendingImageImport is not null || failedThumbnailCount > 0);
-        abortImageLoadingLink.Visible = importing || pendingImageImport is not null || pendingThumbnailLoads > 0;
-        triggerScanButton.Enabled = !importing;
+        bool showAbort = !scanRequested && (importing || pendingImageImport is not null || pendingThumbnailLoads > 0);
+        triggerScanButton.Enabled = !importing && !scanRequested;
+        // WinForms otherwise moves focus from a disappearing link to the add
+        // tile at the end of the page and scrolls there as loading completes.
+        if (triggerScanButton.Enabled &&
+            (cancelImageLoadingLink.Focused && !showCancel || retryImageLoadingLink.Focused && !showRetry ||
+             abortImageLoadingLink.Focused && !showAbort)) triggerScanButton.Focus();
+        cancelImageLoadingLink.Visible = showCancel;
+        retryImageLoadingLink.Visible = showRetry;
+        abortImageLoadingLink.Visible = showAbort;
         UpdateQueueBusyState();
     }
 
@@ -74,7 +90,6 @@ public sealed partial class MainForm
         rememberedImageRestoreCancellation = null;
         operation?.Cancel();
         thumbnailLoadCancellation.Cancel();
-        scanAfterImageImport = false;
         imageLoadingPaused = showMessage;
         if (!showMessage)
         {
@@ -110,6 +125,7 @@ public sealed partial class MainForm
 
     private void StartRememberedImageRestore()
     {
+        initialImageRestoreStarted = true;
         StartImageImport(rememberSelectedImages ? rememberedImages : [], true);
     }
 
@@ -142,7 +158,7 @@ public sealed partial class MainForm
             // every network image merely to restore a large queue.
             while (nextImportOffset < images.Length)
             {
-                await Task.Delay(1, cancellation.Token);
+                await Task.Delay(16, cancellation.Token);
                 cancellation.Token.ThrowIfCancellationRequested();
                 if (!IsCurrentRestore(cancellation)) return;
                 int take = Math.Min(32, images.Length - nextImportOffset);
@@ -157,7 +173,16 @@ public sealed partial class MainForm
                     revision++;
                 }
 
-                RefreshQueueVisuals();
+                // Only the first batch changes the visible page. Later path
+                // batches update counts without canceling and decoding it again.
+                if (nextImportOffset == take) RefreshQueueVisuals();
+                else
+                {
+                    int count;
+                    lock (stateLock) count = selectedImages.Count;
+                    UpdateQueuePagination(count);
+                    UpdateStatus();
+                }
                 imageLoadingLabel.Text = $"正在{(importIsRemembered ? "恢复" : "加入")}图片 {nextImportOffset}/{images.Length}（可取消后继续）…";
                 UpdateQueueBusyState();
             }
@@ -166,7 +191,7 @@ public sealed partial class MainForm
             {
                 pendingImageImport = null;
                 if (!importIsRemembered) SaveRememberedImagesFromCurrentSelection();
-                imageLoadingLabel.Text = $"已{(importIsRemembered ? "恢复" : "加入")} {images.Length} 张，仅加载当前页缩略图（单张最多 10 秒）。";
+                imageLoadingLabel.Text = $"已{(importIsRemembered ? "恢复" : "加入")} {images.Length} 张，可检查顺序后开始扫描。";
             }
         }
         catch (OperationCanceledException)
@@ -182,12 +207,8 @@ public sealed partial class MainForm
             if (IsCurrentRestore(cancellation))
             {
                 rememberedImageRestoreCancellation = null;
+                RefreshQueueVisuals();
                 UpdateImageLoadingActions();
-                if (pendingImageImport is null && scanAfterImageImport)
-                {
-                    scanAfterImageImport = false;
-                    TriggerScan();
-                }
             }
             cancellation.Dispose();
         }
@@ -264,6 +285,7 @@ public sealed partial class MainForm
             pendingThumbnailLoads--;
             if (IsCurrentThumbnail(state, requestId))
             {
+                state.IsLoadingThumbnail = false;
                 state.LoadingIndicator.Active = false;
                 state.LoadingIndicator.Visible = false;
             }

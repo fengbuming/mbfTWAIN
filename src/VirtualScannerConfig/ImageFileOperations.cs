@@ -12,7 +12,12 @@ internal static class ImageFileOperations
     // cancellation. Bound the outstanding calls as well as the caller's wait;
     // an abandoned call retains its slot until it actually finishes.
     private static readonly SemaphoreSlim ReadSlots = new(2, 2);
+    private static readonly SemaphoreSlim PreviewSlots = new(1, 1);
     private static readonly SemaphoreSlim TransferSlots = new(1, 1);
+
+    // An explicit preview must not wait behind a page of slow thumbnails.
+    internal static Task<T> RunPreviewAsync<T>(Func<T> read, CancellationToken token) where T : IDisposable
+        => RunWithSlotsAsync(read, token, ReadTimeout, PreviewSlots);
 
     internal static Task<T> RunTransferAsync<T>(Func<T> read, CancellationToken token) where T : IDisposable
         => RunWithSlotsAsync(read, token, ReadTimeout, TransferSlots);

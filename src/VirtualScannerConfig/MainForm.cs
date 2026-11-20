@@ -45,6 +45,7 @@ public sealed partial class MainForm : Form
 
     private uint revision;
     private bool pipeServerStarted;
+    private bool hasBegunScanSession;
     private bool scanRequested;
     private bool duplexEnabled;
     private bool rememberSelectedImages;
@@ -56,10 +57,10 @@ public sealed partial class MainForm : Form
     private int hoveredImageIndex = -1;
     private ScannerImageSelection[] rememberedImages = [];
     private ReleaseUpdateInfo? latestRelease;
-    private TransferProgressDialog? transferProgressDialog;
+    private TransferProgressView? transferProgressView;
     private CancellationTokenSource? pendingExitCancellation;
 
-    private readonly FlowLayoutPanel thumbnailStrip = new();
+    private readonly FlowLayoutPanel thumbnailStrip = new BufferedFlowLayoutPanel();
     private readonly LinkLabel clearImagesLink = new StateLinkLabel();
     private readonly CheckBox rememberImagesCheckBox = new StateCheckBox();
     private readonly Label settingsSummaryLabel = new();
@@ -72,6 +73,8 @@ public sealed partial class MainForm : Form
 
     internal MainForm(bool startServices)
     {
+        SuspendLayout();
+        DoubleBuffered = true;
         Text = "mbfTwain 虚拟扫描仪";
         Size = new Size(900, 600);
         MinimumSize = new Size(820, 560);
@@ -94,7 +97,7 @@ public sealed partial class MainForm : Form
             (progressRevision, completedImages, totalImages) =>
             {
                 TrackTransferProgress(progressRevision, completedImages, totalImages);
-                PostPipeCallback(() => ApplyTransferProgress(progressRevision, completedImages, totalImages));
+                QueueTransferProgress(progressRevision, completedImages, totalImages);
             },
             onPipeNameInUse: () => PostPipeCallback(RequestExit),
             onIdleTimeout: () => PostPipeCallback(RequestExit),
@@ -103,6 +106,7 @@ public sealed partial class MainForm : Form
         BuildLayout();
         UpdateSettingsSummary();
         RefreshQueueVisuals();
+        ResumeLayout(true);
         Shown += (_, _) =>
         {
             if (startServices)
@@ -113,6 +117,20 @@ public sealed partial class MainForm : Form
             }
         };
         DiagnosticsLog.Write("UI", "MainForm initialized");
+    }
+
+    protected override void OnFormClosing(FormClosingEventArgs e)
+    {
+        // The main window now hosts transfer progress. Closing it during a
+        // transfer returns to the remaining queue so the host can observe the
+        // canceled session before the pipe server is disposed.
+        if (e.CloseReason == CloseReason.UserClosing && scanRequested)
+        {
+            e.Cancel = true;
+            CancelTransferProgressRequest();
+            return;
+        }
+        base.OnFormClosing(e);
     }
 
     protected override void Dispose(bool disposing)
@@ -133,7 +151,7 @@ public sealed partial class MainForm : Form
             }
 
             thumbnailCache.Dispose();
-            transferProgressDialog?.Dispose();
+            transferProgressView?.Dispose();
             pipeServer.Dispose();
             thumbnailLoadCancellation.Dispose();
             updateCancellation.Dispose();
@@ -178,8 +196,8 @@ public sealed partial class MainForm : Form
         footer.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         footer.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
-        statusLabel.AutoSize = true;
-        statusLabel.Anchor = AnchorStyles.Left;
+        statusLabel.Dock = DockStyle.Fill;
+        statusLabel.AutoEllipsis = true;
         statusLabel.ForeColor = MutedTextColor;
         statusLabel.TextAlign = ContentAlignment.MiddleLeft;
         statusLabel.Margin = new Padding(2, 0, 12, 0);
@@ -825,6 +843,7 @@ public sealed partial class MainForm : Form
 
     private bool AddImages()
     {
+        if (scanRequested || rememberedImageRestoreCancellation is not null) return false;
         using var dialog = new OpenFileDialog
         {
             Filter = "图片文件|*.png;*.jpg;*.jpeg;*.bmp;*.tif;*.tiff|所有文件|*.*",
@@ -885,7 +904,7 @@ public sealed partial class MainForm : Form
             }
             if (!stillScanning)
             {
-                CloseTransferProgressDialog();
+                CloseTransferProgressView();
             }
 
             RefreshQueueVisuals();
@@ -904,7 +923,7 @@ public sealed partial class MainForm : Form
             revision++;
         }
 
-        CloseTransferProgressDialog();
+        CloseTransferProgressView();
         RefreshQueueVisuals();
         SaveRememberedImagesFromCurrentSelection();
     }
@@ -967,7 +986,7 @@ public sealed partial class MainForm : Form
 
     private void TriggerScan()
     {
-        if (rememberedImageRestoreCancellation is not null)
+        if (scanRequested || rememberedImageRestoreCancellation is not null)
         {
             return;
         }
@@ -983,7 +1002,7 @@ public sealed partial class MainForm : Form
 
         if (!hasImages)
         {
-            if (AddImages()) scanAfterImageImport = true;
+            AddImages();
             return;
         }
 
@@ -1009,7 +1028,7 @@ public sealed partial class MainForm : Form
         {
             transferImageStager.Reset(scanRevision);
             ShowTransferProgress(scanRevision, completedImages: 0, totalImages: transferImageCount, waitingForTwain: true);
-            Hide();
+            UpdateImageLoadingActions();
         }
     }
 
@@ -1044,9 +1063,14 @@ public sealed partial class MainForm : Form
         exitAfterTransferSummary = false;
         transferSummaryDialog?.Close();
         transferImageStager.Reset();
-        CloseTransferProgressDialog();
-        StopImageLoading(showMessage: false);
-        loadedThumbnailKeys.Clear();
+        CloseTransferProgressView();
+        bool reuseInitialQueue = !hasBegunScanSession && !scanRequested;
+        hasBegunScanSession = true;
+        if (!reuseInitialQueue)
+        {
+            StopImageLoading(showMessage: false);
+            loadedThumbnailKeys.Clear();
+        }
         lock (stateLock)
         {
             if (sessionSettings is not null)
@@ -1054,7 +1078,7 @@ public sealed partial class MainForm : Form
                 ApplySessionSettings(sessionSettings);
             }
 
-            ResetImageSelection();
+            if (!reuseInitialQueue) ResetImageSelection();
             skippedTransferIndices.Clear();
             scanRequested = false;
             revision++;
@@ -1069,7 +1093,7 @@ public sealed partial class MainForm : Form
 
         Show();
         Activate();
-        StartRememberedImageRestore();
+        if (!reuseInitialQueue || !initialImageRestoreStarted) StartRememberedImageRestore();
         DiagnosticsLog.Write("UI", "BeginScanSession.Apply completed and window activated");
     }
 
@@ -1120,7 +1144,7 @@ public sealed partial class MainForm : Form
             return;
         }
 
-        CloseTransferProgressDialog();
+        CloseTransferProgressView();
         transferImageStager.Reset();
         RefreshQueueVisuals();
         Hide();
@@ -1143,7 +1167,7 @@ public sealed partial class MainForm : Form
             return;
         }
 
-        if (acknowledgedRevision != 0 && IsTransferProgressDialogVisible())
+        if (acknowledgedRevision != 0 && IsTransferProgressViewVisible())
         {
             DiagnosticsLog.Write("UI", "HideScanUi deferred because transfer progress dialog is visible");
             return;
@@ -1153,7 +1177,7 @@ public sealed partial class MainForm : Form
         {
             transferImageStager.Reset();
             StopImageLoading(showMessage: false);
-            CloseTransferProgressDialog();
+            CloseTransferProgressView();
         }
 
         Hide();
@@ -1234,7 +1258,7 @@ public sealed partial class MainForm : Form
         int normalizedCompleted = Math.Clamp(completedImages, 0, normalizedTotal);
         if (normalizedCompleted >= normalizedTotal)
         {
-            CloseTransferProgressDialog();
+            transferProgressView?.UpdateProgress(progressRevision, normalizedCompleted, normalizedTotal, false);
             DiagnosticsLog.Write(
                 "UI",
                 $"Transfer progress completed revision={progressRevision} completed={normalizedCompleted} total={normalizedTotal}");
@@ -1257,40 +1281,30 @@ public sealed partial class MainForm : Form
 
         int normalizedTotal = Math.Max(1, totalImages);
         int normalizedCompleted = Math.Clamp(completedImages, 0, normalizedTotal);
-        transferProgressDialog ??= CreateTransferProgressDialog();
-        transferProgressDialog.UpdateProgress(progressRevision, normalizedCompleted, normalizedTotal, waitingForTwain);
-        transferProgressDialog.SetPaused(transferPaused, imageFailed: failedTransferImageIndex >= 0);
+        transferProgressView ??= CreateTransferProgressView();
+        transferProgressView.UpdateProgress(progressRevision, normalizedCompleted, normalizedTotal, waitingForTwain);
+        transferProgressView.SetPaused(transferPaused, imageFailed: failedTransferImageIndex >= 0);
 
-        if (!transferProgressDialog.Visible)
+        if (!transferProgressView.Visible)
         {
-            transferProgressDialog.Show();
-            Enabled = false;
+            transferProgressView.Visible = true;
         }
-
-        transferProgressDialog.BringToFront();
-        transferProgressDialog.Activate();
+        transferProgressView.BringToFront();
     }
 
-    private TransferProgressDialog CreateTransferProgressDialog()
+    private TransferProgressView CreateTransferProgressView()
     {
-        var dialog = new TransferProgressDialog();
+        var dialog = new TransferProgressView();
         dialog.CancelRequested += (_, _) => PauseTransfer();
         dialog.ContinueRequested += (_, _) => ResumeTransfer();
         dialog.SkipRequested += (_, _) => SkipFailedTransferImage();
         dialog.ReplaceRequested += (_, _) => ReplaceFailedTransferImage();
         dialog.AbortRequested += (_, _) => CancelTransferProgressRequest();
-        dialog.FormClosed += (_, _) =>
-        {
-            if (ReferenceEquals(transferProgressDialog, dialog))
-            {
-                transferProgressDialog = null;
-            }
-
-            if (!IsDisposed && !Disposing)
-            {
-                Enabled = true;
-            }
-        };
+        queueScrollBeforeTransfer = new Point(-queueViewport.AutoScrollPosition.X, -queueViewport.AutoScrollPosition.Y);
+        queueViewport.AutoScrollPosition = Point.Empty;
+        queueViewport.AutoScroll = false;
+        thumbnailStrip.Visible = false;
+        queueViewport.Controls.Add(dialog);
         return dialog;
     }
 
@@ -1308,7 +1322,7 @@ public sealed partial class MainForm : Form
             }
         }
 
-        CloseTransferProgressDialog();
+        CloseTransferProgressView();
         transferImageStager.Reset();
         RefreshQueueVisuals();
         UpdateStatus();
@@ -1317,26 +1331,26 @@ public sealed partial class MainForm : Form
         DiagnosticsLog.Write("UI", "Transfer progress dialog canceled by user");
     }
 
-    private bool IsTransferProgressDialogVisible()
+    private bool IsTransferProgressViewVisible()
     {
-        return transferProgressDialog is { IsDisposed: false, Visible: true };
+        return transferProgressView is { IsDisposed: false, Visible: true };
     }
 
-    private void CloseTransferProgressDialog()
+    private void CloseTransferProgressView()
     {
-        TransferProgressDialog? dialog = transferProgressDialog;
-        transferProgressDialog = null;
-        if (!IsDisposed && !Disposing)
-        {
-            Enabled = true;
-        }
-
+        TransferProgressView? dialog = transferProgressView;
+        transferProgressView = null;
         if (dialog is null || dialog.IsDisposed)
         {
             return;
         }
 
-        dialog.Close();
+        queueViewport.Controls.Remove(dialog);
+        dialog.Dispose();
+        thumbnailStrip.Visible = true;
+        queueViewport.AutoScroll = true;
+        queueViewport.AutoScrollPosition = queueScrollBeforeTransfer;
+        UpdateQueueBusyState();
     }
 
     private void NormalizeSelection()
@@ -1373,10 +1387,15 @@ public sealed partial class MainForm : Form
             hoveredIndex = hoveredImageIndex;
         }
 
-        CancellationToken cancellationToken = RestartThumbnailLoads();
-        failedThumbnailCount = 0;
+        bool pageChanged = thumbnailStrip.Controls.OfType<Panel>().Count() != snapshot.Count ||
+            snapshot.Where((image, slot) => slot >= thumbnailStrip.Controls.Count ||
+                thumbnailStrip.Controls[slot].Tag is not ThumbnailTileState state || state.Image != image).Any();
+        CancellationToken cancellationToken = pageChanged || thumbnailLoadCancellation.IsCancellationRequested
+            ? RestartThumbnailLoads() : thumbnailLoadCancellation.Token;
+        if (pageChanged) failedThumbnailCount = 0;
         Button addButton = GetAddTileButton();
-
+        Point scrollPosition = new(-queueViewport.AutoScrollPosition.X, -queueViewport.AutoScrollPosition.Y);
+        queueViewport.SuspendLayout();
         thumbnailStrip.SuspendLayout();
         try
         {
@@ -1430,6 +1449,8 @@ public sealed partial class MainForm : Form
         finally
         {
             thumbnailStrip.ResumeLayout();
+            queueViewport.ResumeLayout(true);
+            queueViewport.AutoScrollPosition = scrollPosition;
         }
     }
 
@@ -1590,16 +1611,18 @@ public sealed partial class MainForm : Form
         Size size,
         CancellationToken cancellationToken)
     {
-        state.LoadingIndicator.Active = false;
-        state.LoadingIndicator.Visible = false;
         // No file metadata or file-system probes on the UI thread. The key is
         // only populated after the background reader has successfully read it.
-        if (state.LoadedImage == image && state.HasLoadedThumbnail)
+        if (state.LoadedImage == image && (state.HasLoadedThumbnail ||
+            state.IsLoadingThumbnail && !state.LoadCancellationToken.IsCancellationRequested))
         {
             return;
         }
 
         state.LoadedImage = image;
+        state.IsLoadingThumbnail = false;
+        state.LoadingIndicator.Active = false;
+        state.LoadingIndicator.Visible = false;
         state.HasLoadedThumbnail = false;
         state.ThumbnailKey = null;
         int requestId = ++state.ThumbnailRequestId;
@@ -1624,16 +1647,36 @@ public sealed partial class MainForm : Form
         ReplacePictureBoxImage(state.PictureBox, CreateFallbackThumbnail(size, "加载中\n可取消"));
         state.LoadingIndicator.Visible = true;
         state.LoadingIndicator.Active = true;
+        state.IsLoadingThumbnail = true;
+        state.LoadCancellationToken = cancellationToken;
         _ = LoadThumbnailAsync(state, image, size, requestId, cancellationToken);
     }
 
     private void AddThumbnailActionControls(Panel tile, int index)
     {
-        RemoveThumbnailActionControls(tile);
         int totalCount;
         lock (stateLock)
         {
             totalCount = selectedImages.Count;
+        }
+        if (tile.Tag is ThumbnailTileState state)
+        {
+            if (state.ActionsIndex == index)
+            {
+                foreach (Button button in tile.Controls.OfType<Button>())
+                {
+                    button.Visible = true;
+                    if (button.Text == "‹") button.Enabled = index > 0;
+                    if (button.Text == "›") button.Enabled = index < totalCount - 1;
+                }
+                return;
+            }
+            state.ActionsIndex = index;
+        }
+        foreach (Button button in tile.Controls.OfType<Button>().ToArray())
+        {
+            tile.Controls.Remove(button);
+            button.Dispose();
         }
 
         const int edgeInset = 12;
@@ -1674,8 +1717,7 @@ public sealed partial class MainForm : Form
     {
         foreach (Control control in tile.Controls.Cast<Control>().Where(control => control is not PictureBox).ToArray())
         {
-            tile.Controls.Remove(control);
-            control.Dispose();
+            control.Visible = false;
         }
     }
 
@@ -1902,8 +1944,8 @@ public sealed partial class MainForm : Form
             BackColor = Color.Black,
             SizeMode = PictureBoxSizeMode.Zoom,
         };
-        using var loading = new WaitOverlay { BackColor = Color.FromArgb(24, 30, 26) };
         var footer = new Panel { Dock = DockStyle.Bottom, Height = 48, BackColor = Color.FromArgb(24, 30, 26) };
+        var previewIndicator = new BusyIndicator { Dock = DockStyle.Left, Width = 32, ForeColor = Color.White };
         var message = new Label
         {
             Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft,
@@ -1912,17 +1954,18 @@ public sealed partial class MainForm : Form
         };
         var retry = new ActionButton
         {
-            Dock = DockStyle.Right, Width = 120, Text = "重新加载", Visible = false,
+            Dock = DockStyle.Right, Width = 120, Text = "重新加载", Enabled = false,
         };
         var close = new ActionButton { Dock = DockStyle.Right, Width = 100, Text = "关闭预览" };
         close.Click += (_, _) => dialog.Close();
         footer.Controls.Add(message);
+        footer.Controls.Add(previewIndicator);
         footer.Controls.Add(retry);
         footer.Controls.Add(close);
         dialog.Controls.Add(viewer);
         dialog.Controls.Add(footer);
-        dialog.Controls.Add(loading);
-        loading.CancelRequested += (_, _) => dialog.Close();
+        if (loadedThumbnailKeys.TryGetValue(image, out ThumbnailCacheKey previewKey))
+            viewer.Image = thumbnailCache.TryClone(previewKey);
         dialog.FormClosing += (_, _) => cancellation.Cancel();
         dialog.KeyDown += (_, args) =>
         {
@@ -1936,13 +1979,11 @@ public sealed partial class MainForm : Form
         async Task LoadPreviewAsync()
         {
             retry.Enabled = false;
-            retry.Visible = false;
-            viewer.Enabled = false;
-            viewer.Visible = false;
-            loading.ShowLoading(null, "正在加载预览", "最多等待 10 秒 · 可取消或按 Esc 关闭", allowAbort: false);
+            previewIndicator.Active = true;
+            message.Text = "正在加载完整预览 · 可按 Esc 或点击关闭预览";
             try
             {
-                Bitmap preview = await ImageFileOperations.RunAsync(
+                Bitmap preview = await ImageFileOperations.RunPreviewAsync(
                     () => LoadPreparedImage(image.Path, image.RotationDegrees), cancellation.Token);
                 if (cancellation.IsCancellationRequested || dialog.IsDisposed || !dialog.Visible)
                 {
@@ -1963,7 +2004,6 @@ public sealed partial class MainForm : Form
                     message.Text = exception is TimeoutException
                         ? "预览加载超时，请检查网络后重试，或关闭窗口。"
                         : "暂时无法读取图片，请检查文件或网络后重试。";
-                    retry.Visible = true;
                     DiagnosticsLog.WriteException("UI", exception, $"Load preview path={image.Path}");
                 }
             }
@@ -1971,9 +2011,7 @@ public sealed partial class MainForm : Form
             {
                 if (!dialog.IsDisposed)
                 {
-                    loading.Dismiss();
-                    viewer.Enabled = true;
-                    viewer.Visible = true;
+                    previewIndicator.Active = false;
                     retry.Enabled = true;
                 }
             }
@@ -1995,7 +2033,7 @@ public sealed partial class MainForm : Form
             activePage = selectedImageIndex + 1;
         }
 
-        string scanState = snapshot.ScanRequested ? "等待 TWAIN 程序取图" : "等待选择图片";
+        string scanState = snapshot.ScanRequested ? "正在送图" : snapshot.TotalImageCount > 0 ? "准备就绪" : "等待选择图片";
         string activeText = snapshot.TotalImageCount == 0 || activePage <= 0
             ? "未选中页面"
             : $"当前第 {activePage}/{snapshot.TotalImageCount} 页";
@@ -2003,7 +2041,7 @@ public sealed partial class MainForm : Form
             ? $" | 新版本 {release.TagName}"
             : string.Empty;
         statusLabel.Text =
-            $"{scanState} | 队列 {snapshot.TotalImageCount} | {activeText} | {snapshot.PixelType} | {snapshot.PaperSize} | {snapshot.XResolution}x{snapshot.YResolution} DPI | 管道 {ScannerPipeServer.PipeName}{updateText}";
+            $"{scanState} · 共 {snapshot.TotalImageCount} 张 · {activeText}{updateText}";
     }
 
     private static int NormalizeRotationDegrees(int rotationDegrees)
@@ -2249,6 +2287,12 @@ public sealed partial class MainForm : Form
         public ThumbnailCacheKey? ThumbnailKey { get; set; }
 
         public int ThumbnailRequestId { get; set; }
+
+        public int ActionsIndex { get; set; } = -1;
+
+        public bool IsLoadingThumbnail { get; set; }
+
+        public CancellationToken LoadCancellationToken { get; set; }
 
         public bool HasLoadedThumbnail { get; set; }
     }
